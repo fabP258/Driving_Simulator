@@ -22,6 +22,7 @@ class VqVaeTrainer:
         num_workers: int = 12,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-8,
+        loss_beta: float = 0.25,
     ):
 
         # split the segment folders into test and training data
@@ -65,6 +66,7 @@ class VqVaeTrainer:
         )
 
         self._loss_fn = torch.nn.MSELoss()
+        self._loss_beta = 0.25
 
         self._train_loss = []
         self._test_loss = []
@@ -88,15 +90,16 @@ class VqVaeTrainer:
         for batch, x in enumerate(self._train_dataloader):
             self._optimizer.zero_grad()
             x = x.to(self._device)
-            x_recon = self._model(x)
-            loss = self._loss_fn(x_recon, x)
-            # TODO: Add commitment loss
+            out = self._model(x)
+            loss = self._loss_fn(out["x_recon"], x)
+            loss += self._loss_beta * out["commitment_loss"]
+            loss += out["dictionary_loss"]
             epoch_loss += loss.item()
-            if batch % 100 == 0:
+            if batch % 1000 == 0:
                 print(
                     f"batch loss: {loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
                 )
-                self.plot_sample(x[0, :], x_recon[0, :], epoch, batch, False)
+                self.plot_sample(x[0, :], out["x_recon"][0, :], epoch, batch, False)
             loss.backward()
             self._optimizer.step()
 
@@ -107,7 +110,7 @@ class VqVaeTrainer:
 
     def generate_loss_plot(self, suffix: str = ""):
         fig, ax = plt.subplots()
-        ax.plot(self._test_loss, label="Train")
+        ax.plot(self._train_loss, label="Train")
         ax.legend()
         ax.set_xlabel("Epoch [-]")
         ax.set_ylabel("Loss")

@@ -1,6 +1,7 @@
 import torch
 
 from torch import nn
+from torch.nn import functional as F
 
 
 class ResidualStack(nn.Module):
@@ -138,6 +139,50 @@ class Decoder(nn.Module):
         return x_recon
 
 
+class VectorQuantizer(nn.Module):
+    def __init__(self, embedding_dim: int, num_embeddings: int):
+        super().__init__()
+
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+
+        # Dictionary embeddings
+        limit = 3**0.5
+        self.embedding_table = nn.Parameter(
+            torch.FloatTensor(embedding_dim, num_embeddings).uniform_(-limit, limit)
+        )
+
+    def forward(self, x):
+        # [B, C, H, W] -> [B, H, W, C] -> [B x H x W, C]
+        flat_x = x.permute(0, 2, 3, 1).reshape(-1, self.embedding_dim)
+        distances = (
+            (flat_x**2).sum(1, keepdim=True)
+            - 2 * flat_x @ self.embedding_table
+            + (self.embedding_table**2).sum(0, keepdim=True)
+        )
+        encoding_indices = distances.argmin(1)
+        quantized_x = F.embedding(
+            encoding_indices.view(x.shape[0], *x.shape[2:]),
+            self.embedding_table.transpose(0, 1),
+        ).permute(0, 3, 1, 2)
+
+        # See second term of Equation (3).
+        dictionary_loss = ((x.detach() - quantized_x) ** 2).mean()
+
+        # See third term of Equation (3).
+        commitment_loss = ((x - quantized_x.detach()) ** 2).mean()
+
+        # Straight-through gradient.
+        quantized_x = x + (quantized_x - x).detach()
+
+        return (
+            quantized_x,
+            dictionary_loss,
+            commitment_loss,
+            encoding_indices.view(x.shape[0], -1),
+        )
+
+
 class VQVAE(nn.Module):
 
     def __init__(
@@ -161,6 +206,7 @@ class VQVAE(nn.Module):
         self.pre_vq_conv = nn.Conv2d(
             in_channels=num_hiddens, out_channels=embedding_dim, kernel_size=1
         )
+        self.vq = VectorQuantizer(embedding_dim, num_embeddings)
         self.decoder = Decoder(
             embedding_dim,
             num_hiddens,
@@ -169,9 +215,16 @@ class VQVAE(nn.Module):
             num_residual_hiddens,
         )
 
+    def quantize(self, x):
+        z = self.pre_vq_conv(self.encoder(x))
+        (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = self.vq(z)
+        return (z_quantized, dictionary_loss, commitment_loss, encoding_indices)
+
     def forward(self, x):
-        h = self.encoder(x)
-        z = self.pre_vq_conv(h)
-        # TODO: Quantize latents
-        x_recon = self.decoder(z)
-        return x_recon
+        (z_quantized, dictionary_loss, commitment_loss, _) = self.quantize(x)
+        x_recon = self.decoder(z_quantized)
+        return {
+            "dictionary_loss": dictionary_loss,
+            "commitment_loss": commitment_loss,
+            "x_recon": x_recon,
+        }

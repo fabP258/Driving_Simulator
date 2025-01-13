@@ -1,6 +1,7 @@
 import random
 from typing import List
 from pathlib import Path
+import numpy as np
 import matplotlib.pyplot as plt
 
 import torch
@@ -75,11 +76,11 @@ class VqVaeTrainer:
 
         for epoch in range(epochs):
             print(f"Epoch {epoch+1}\n-------------------------------")
-            self._train_loss.append(self.train_single_epoch())
+            self._train_loss.append(self.train_single_epoch(epoch))
             # TODO: Run test
             self.generate_loss_plot(suffix=f"ep{epoch}")
 
-    def train_single_epoch(self):
+    def train_single_epoch(self, epoch: int):
         self._model.train()
 
         epoch_loss = 0
@@ -95,6 +96,7 @@ class VqVaeTrainer:
                 print(
                     f"batch loss: {loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
                 )
+                self.plot_sample(x[0, :], x_recon[0, :], epoch, batch, False)
             loss.backward()
             self._optimizer.step()
 
@@ -111,6 +113,37 @@ class VqVaeTrainer:
         ax.set_ylabel("Loss")
 
         fig.savefig(self._output_path / f"loss_plot_{suffix}.png")
+
+    @staticmethod
+    def image_tensor_to_array(image: torch.Tensor):
+        arr = image.cpu().detach().numpy()
+        return np.transpose(arr, (1, 2, 0))
+
+    def plot_sample(
+        self,
+        x: torch.Tensor,
+        x_recon: torch.Tensor,
+        epoch: int,
+        batch: int,
+        validation: bool,
+    ):
+        fig, ax = plt.subplots(nrows=2)
+        ax[0].imshow(VqVaeTrainer.image_tensor_to_array(x))
+        ax[0].axis("off")
+        ax[0].set_title("Input image")
+        ax[1].imshow(VqVaeTrainer.image_tensor_to_array(x_recon))
+        ax[1].axis("off")
+        ax[1].set_title("Reconstructed image")
+
+        output_path = (
+            self._output_path / "validation"
+            if validation
+            else self._output_path / "train"
+        )
+        output_path = output_path / f"ep{epoch:02}"
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        fig.savefig(output_path / f"image_reconstruction_b{batch:06}.png")
 
     @staticmethod
     def split_list(list_to_split: list, shuffle: bool = False, ratio: float = 0.5):

@@ -217,6 +217,15 @@ class VQVAE(nn.Module):
             num_residual_hiddens,
         )
 
+        # keep args for saving as checkpoint
+        self._in_channels = in_channels
+        self._num_hiddens = num_hiddens
+        self._num_downsampling_layers = num_downsampling_layers
+        self._num_residual_layers = num_residual_layers
+        self._num_residual_hiddens = num_residual_hiddens
+        self._embedding_dim = embedding_dim
+        self._num_embeddings = num_embeddings
+
     def quantize(self, x):
         z = self.pre_vq_conv(self.encoder(x))
         (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = self.vq(z)
@@ -236,12 +245,20 @@ class VQVAE(nn.Module):
         output_path: str | Path,
         epoch: int,
         postfix: str = None,
-        metadata: dict = None,
     ):
-        output = {"epoch": epoch, "model_state_dict": self.state_dict()}
-
-        if metadata:
-            output.update(metadata)
+        output = {
+            "epoch": epoch,
+            "model_state_dict": self.state_dict(),
+            "args": (
+                self._in_channels,
+                self._num_hiddens,
+                self._num_downsampling_layers,
+                self._num_residual_layers,
+                self._num_residual_hiddens,
+                self._embedding_dim,
+                self._num_embeddings,
+            ),
+        }
 
         file_name = type(self).__name__
         if postfix:
@@ -251,11 +268,9 @@ class VQVAE(nn.Module):
 
         torch.save(output, Path(output_path) / file_name)
 
-    def load_from_checkpoint(self, checkpoint_path: str | Path) -> Union[dict, None]:
+    @classmethod
+    def from_checkpoint(cls, checkpoint_path: str | Path):
         checkpoint = torch.load(checkpoint_path)
-        self.load_state_dict(checkpoint.pop("model_state_dict"))
-
-        if len(checkpoint.keys()) > 0:
-            return checkpoint
-
-        return None
+        model = cls(*checkpoint["args"])
+        model.load_state_dict(checkpoint["model_state_dict"])
+        return model

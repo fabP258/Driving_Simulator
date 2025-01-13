@@ -57,7 +57,7 @@ class VqVaeTrainer:
             num_residual_layers=2,
             num_residual_hiddens=256,
             embedding_dim=16,
-            num_embeddings=512,
+            num_embeddings=1024,
         )
         self._model.to(self._device)
 
@@ -66,7 +66,7 @@ class VqVaeTrainer:
         )
 
         self._loss_fn = torch.nn.MSELoss()
-        self._loss_beta = 0.25
+        self._loss_beta = loss_beta
 
         self.initialize_loss_containers()
 

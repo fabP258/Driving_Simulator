@@ -83,7 +83,9 @@ class VqVaeTrainer:
             overall_loss, recon_loss = self.train_single_epoch(epoch)
             self._train_loss["overall_loss"].append(overall_loss)
             self._train_loss["reconstruction_loss"].append(recon_loss)
-            # TODO: Run test
+            self._test_loss["reconstruction_loss"].append(
+                self.calculate_test_loss(epoch)
+            )
             self.generate_loss_plot(suffix=f"ep{epoch}")
             self._model.save_checkpoint(self._output_path, epoch)
 
@@ -114,6 +116,25 @@ class VqVaeTrainer:
         print(f"Mean epoch train reconstruction loss: {recon_epoch_loss}")
 
         return overall_epoch_loss, recon_epoch_loss
+
+    @torch.no_grad
+    def calculate_test_loss(self, epoch: int):
+        self._model.eval()
+
+        recon_test_loss = 0
+
+        for batch, x in enumerate(self._test_dataloader):
+            x = x.to(self._device)
+            out = self._model(x)
+            recon_test_loss += self._loss_fn(out["x_recon"], x).item()
+
+            if batch % 500 == 0:
+                self.plot_sample(x[0, :], out["x_recon"][0, :], epoch, batch, True)
+
+        recon_test_loss /= len(self._test_dataloader)
+        print(f"Mean test reconstruction loss: {recon_test_loss:>8f} \n")
+
+        return recon_test_loss
 
     def generate_loss_plot(self, suffix: str = ""):
         fig, ax = plt.subplots()

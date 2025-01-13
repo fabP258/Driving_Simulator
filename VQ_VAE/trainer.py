@@ -68,17 +68,21 @@ class VqVaeTrainer:
         self._loss_fn = torch.nn.MSELoss()
         self._loss_beta = 0.25
 
-        self._train_loss = []
-        self._test_loss = []
+        self.initialize_loss_containers()
+
+    def initialize_loss_containers(self):
+        self._train_loss = {"reconstruction_loss": [], "overall_loss": []}
+        self._test_loss = {"reconstruction_loss": []}
 
     def train(self, epochs: int):
 
-        self._train_loss = []
-        self._test_loss = []
+        self.initialize_loss_containers()
 
         for epoch in range(epochs):
             print(f"Epoch {epoch+1}\n-------------------------------")
-            self._train_loss.append(self.train_single_epoch(epoch))
+            overall_loss, recon_loss = self.train_single_epoch(epoch)
+            self._train_loss["overall_loss"].append(overall_loss)
+            self._train_loss["reconstruction_loss"].append(recon_loss)
             # TODO: Run test
             self.generate_loss_plot(suffix=f"ep{epoch}")
             self._model.save_checkpoint(self._output_path, epoch)
@@ -86,16 +90,18 @@ class VqVaeTrainer:
     def train_single_epoch(self, epoch: int):
         self._model.train()
 
-        epoch_loss = 0
+        overall_epoch_loss = 0
+        recon_epoch_loss = 0
 
         for batch, x in enumerate(self._train_dataloader):
             self._optimizer.zero_grad()
             x = x.to(self._device)
             out = self._model(x)
-            loss = self._loss_fn(out["x_recon"], x)
-            loss += self._loss_beta * out["commitment_loss"]
+            recon_loss = self._loss_fn(out["x_recon"], x)
+            loss = recon_loss + self._loss_beta * out["commitment_loss"]
             loss += out["dictionary_loss"]
-            epoch_loss += loss.item()
+            overall_epoch_loss += loss.item()
+            recon_epoch_loss += recon_loss.item()
             if batch % 1000 == 0:
                 print(
                     f"batch loss: {loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
@@ -104,14 +110,15 @@ class VqVaeTrainer:
             loss.backward()
             self._optimizer.step()
 
-        epoch_loss /= len(self._train_dataloader)
-        print(f"Mean epoch train loss: {epoch_loss}")
+        overall_epoch_loss /= len(self._train_dataloader)
+        print(f"Mean epoch train reconstruction loss: {recon_epoch_loss}")
 
-        return epoch_loss
+        return overall_epoch_loss, recon_epoch_loss
 
     def generate_loss_plot(self, suffix: str = ""):
         fig, ax = plt.subplots()
-        ax.plot(self._train_loss, label="Train")
+        ax.plot(self._train_loss["reconstruction_loss"], label="Train (recon.)")
+        ax.plot(self._train_loss["overall_loss"], label="Train (sum)")
         ax.legend()
         ax.set_xlabel("Epoch [-]")
         ax.set_ylabel("Loss")

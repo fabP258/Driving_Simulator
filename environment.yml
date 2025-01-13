@@ -1,0 +1,11 @@
+name: driving_simulator
+channels:
+  - pytorch
+  - nvidia
+dependencies:
+  - cudatoolkit
+  - matplotlib
+  - python
+  - pytorch
+  - pytorch-cuda
+  - torchvision

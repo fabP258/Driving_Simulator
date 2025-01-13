@@ -1,4 +1,6 @@
 import torch
+from pathlib import Path
+from typing import Union
 
 from torch import nn
 from torch.nn import functional as F
@@ -228,3 +230,32 @@ class VQVAE(nn.Module):
             "commitment_loss": commitment_loss,
             "x_recon": x_recon,
         }
+
+    def save_checkpoint(
+        self,
+        output_path: str | Path,
+        epoch: int,
+        postfix: str = None,
+        metadata: dict = None,
+    ):
+        output = {"epoch": epoch, "model_state_dict": self.state_dict()}
+
+        if metadata:
+            output.update(metadata)
+
+        file_name = type(self).__name__
+        if postfix:
+            file_name += postfix
+        file_name += f"_ep{epoch:03}"
+        file_name += ".pth"
+
+        torch.save(output, Path(output_path) / file_name)
+
+    def load_from_checkpoint(self, checkpoint_path: str | Path) -> Union[dict, None]:
+        checkpoint = torch.load(checkpoint_path)
+        self.load_state_dict(checkpoint.pop("model_state_dict"))
+
+        if len(checkpoint.keys()) > 0:
+            return checkpoint
+
+        return None

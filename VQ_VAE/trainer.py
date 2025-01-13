@@ -81,6 +81,7 @@ class VqVaeTrainer:
             self._train_loss.append(self.train_single_epoch(epoch))
             # TODO: Run test
             self.generate_loss_plot(suffix=f"ep{epoch}")
+            self._model.save_checkpoint(self._output_path, epoch)
 
     def train_single_epoch(self, epoch: int):
         self._model.train()

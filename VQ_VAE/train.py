@@ -20,7 +20,7 @@ def main():
     output_path = Path(__file__).parent / "output"
     output_path.mkdir(exist_ok=True, parents=True)
 
-    trainer = VqVaeTrainer(segment_folders, output_path, batch_size=5, num_workers=4)
+    trainer = VqVaeTrainer(segment_folders, output_path, batch_size=15, num_workers=16)
     trainer.train(25)
 
 

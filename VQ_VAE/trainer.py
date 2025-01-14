@@ -113,6 +113,7 @@ class VqVaeTrainer:
             self._optimizer.step()
 
         overall_epoch_loss /= len(self._train_dataloader)
+        recon_epoch_loss /= len(self._train_dataloader)
         print(f"Mean epoch train reconstruction loss: {recon_epoch_loss}")
 
         return overall_epoch_loss, recon_epoch_loss
@@ -140,6 +141,7 @@ class VqVaeTrainer:
         fig, ax = plt.subplots()
         ax.plot(self._train_loss["reconstruction_loss"], label="Train (recon.)")
         ax.plot(self._train_loss["overall_loss"], label="Train (sum)")
+        ax.plot(self._test_loss["reconstruction_loss"], label="Test (recon.)")
         ax.legend()
         ax.set_xlabel("Epoch [-]")
         ax.set_ylabel("Loss")

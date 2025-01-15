@@ -165,6 +165,7 @@ class VqVaeTrainer:
     @staticmethod
     def image_tensor_to_array(image: torch.Tensor):
         arr = image.cpu().detach().numpy()
+        np.clip(arr, 0, 1, out=arr)
         return np.transpose(arr, (1, 2, 0))
 
     def plot_sample(

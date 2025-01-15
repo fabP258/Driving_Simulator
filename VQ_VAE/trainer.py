@@ -19,7 +19,7 @@ class VqVaeTrainer:
         output_path: Path,
         train_test_ratio: float = 0.8,
         batch_size: int = 10,
-        num_workers: int = 12,
+        num_workers: int = 18,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-8,
         loss_beta: float = 0.25,
@@ -57,7 +57,7 @@ class VqVaeTrainer:
             num_residual_layers=2,
             num_residual_hiddens=256,
             embedding_dim=16,
-            num_embeddings=1024,
+            num_embeddings=2048,
         )
         self._model.to(self._device)
 
@@ -87,6 +87,8 @@ class VqVaeTrainer:
                 self.calculate_test_loss(epoch)
             )
             self.generate_loss_plot(suffix=f"ep{epoch}")
+            self.plot_codebook_usage(suffix=f"ep{epoch}")
+            self._model.reset_codebook_usage_counts()
             self._model.save_checkpoint(self._output_path, epoch)
 
     def train_single_epoch(self, epoch: int):
@@ -147,6 +149,18 @@ class VqVaeTrainer:
         ax.set_ylabel("Loss")
 
         fig.savefig(self._output_path / f"loss_plot_{suffix}.png")
+
+    def plot_codebook_usage(self, suffix: str = ""):
+        codebook_usage_counts = self._model.get_codebook_usage_counts()
+        fig, ax = plt.subplots()
+        ax.scatter(
+            x=list(range(len(codebook_usage_counts))),
+            y=codebook_usage_counts,
+        )
+        ax.set_xlabel("Codebook index")
+        ax.set_ylabel("Count")
+
+        fig.savefig(self._output_path / f"codebook_usage_counts_{suffix}.png")
 
     @staticmethod
     def image_tensor_to_array(image: torch.Tensor):

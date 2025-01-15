@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from pathlib import Path
 from typing import Union
 
@@ -217,6 +218,9 @@ class VQVAE(nn.Module):
             num_residual_hiddens,
         )
 
+        # log codebook vector usage
+        self._codebook_usage_counts = torch.zeros(num_embeddings, dtype=torch.int32)
+
         # keep args for saving as checkpoint
         self._in_channels = in_channels
         self._num_hiddens = num_hiddens
@@ -226,9 +230,27 @@ class VQVAE(nn.Module):
         self._embedding_dim = embedding_dim
         self._num_embeddings = num_embeddings
 
+    def update_codebook_usage_counts(self, encoding_indices: torch.Tensor):
+        flattened_encoding_indices = encoding_indices.flatten().cpu()
+        self._codebook_usage_counts += torch.bincount(
+            flattened_encoding_indices, minlength=self._num_embeddings
+        )
+
+    def get_codebook_usage_counts(self, normalize: bool = True):
+        usage_counts = self._codebook_usage_counts.numpy()
+        if normalize:
+            usage_counts = usage_counts / np.sum(usage_counts)
+        return usage_counts
+
+    def reset_codebook_usage_counts(self):
+        self._codebook_usage_counts = torch.zeros(
+            self._num_embeddings, dtype=torch.int32
+        )
+
     def quantize(self, x):
         z = self.pre_vq_conv(self.encoder(x))
         (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = self.vq(z)
+        self.update_codebook_usage_counts(encoding_indices)
         return (z_quantized, dictionary_loss, commitment_loss, encoding_indices)
 
     def forward(self, x):

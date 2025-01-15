@@ -150,7 +150,7 @@ class VectorQuantizer(nn.Module):
         self.num_embeddings = num_embeddings
 
         # Dictionary embeddings
-        limit = 3**0.5
+        limit = 0.5
         self.embedding_table = nn.Parameter(
             torch.FloatTensor(embedding_dim, num_embeddings).uniform_(-limit, limit)
         )
@@ -178,10 +178,19 @@ class VectorQuantizer(nn.Module):
         # Straight-through gradient.
         quantized_x = x + (quantized_x - x).detach()
 
+        # Entropy loss to avoid codebook collapse.
+        codebook_usage_counts = torch.bincount(encoding_indices.flatten())
+        codebook_probabilities = codebook_usage_counts / codebook_usage_counts.sum()
+        # Negative entropy is used for maximaization.
+        entropy_loss = torch.sum(
+            codebook_probabilities * torch.log(codebook_probabilities + 1e-10)
+        )
+
         return (
             quantized_x,
             dictionary_loss,
             commitment_loss,
+            entropy_loss,
             encoding_indices.view(x.shape[0], -1),
         )
 
@@ -249,16 +258,31 @@ class VQVAE(nn.Module):
 
     def quantize(self, x):
         z = self.pre_vq_conv(self.encoder(x))
-        (z_quantized, dictionary_loss, commitment_loss, encoding_indices) = self.vq(z)
+        (
+            z_quantized,
+            dictionary_loss,
+            commitment_loss,
+            entropy_loss,
+            encoding_indices,
+        ) = self.vq(z)
         self.update_codebook_usage_counts(encoding_indices)
-        return (z_quantized, dictionary_loss, commitment_loss, encoding_indices)
+        return (
+            z_quantized,
+            dictionary_loss,
+            commitment_loss,
+            entropy_loss,
+            encoding_indices,
+        )
 
     def forward(self, x):
-        (z_quantized, dictionary_loss, commitment_loss, _) = self.quantize(x)
+        (z_quantized, dictionary_loss, commitment_loss, entropy_loss, _) = (
+            self.quantize(x)
+        )
         x_recon = self.decoder(z_quantized)
         return {
             "dictionary_loss": dictionary_loss,
             "commitment_loss": commitment_loss,
+            "entropy_loss": entropy_loss,
             "x_recon": x_recon,
         }
 

@@ -6,6 +6,8 @@ from typing import Union
 from torch import nn
 from torch.nn import functional as F
 
+from scipy.cluster.vq import kmeans2
+
 
 class ResidualStack(nn.Module):
     def __init__(
@@ -143,11 +145,14 @@ class Decoder(nn.Module):
 
 
 class VectorQuantizer(nn.Module):
-    def __init__(self, embedding_dim: int, num_embeddings: int):
+    def __init__(
+        self, embedding_dim: int, num_embeddings: int, use_l2_normalization: bool = True
+    ):
         super().__init__()
 
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
+        self.use_l2_normalization = use_l2_normalization
 
         # Dictionary embeddings
         limit = 0.5
@@ -155,15 +160,37 @@ class VectorQuantizer(nn.Module):
             torch.FloatTensor(embedding_dim, num_embeddings).uniform_(-limit, limit)
         )
 
+        self.register_buffer("data_initialized", torch.zeros(1))
+
     def forward(self, x):
         # [B, C, H, W] -> [B, H, W, C] -> [B x H x W, C]
         flat_x = x.permute(0, 2, 3, 1).reshape(-1, self.embedding_dim)
+
+        # K means initialization
+        # https://github.com/karpathy/deep-vector-quantization/blob/main/dvq/model/quantize.py
+        if self.training and self.data_initialized.item() == 0:
+            print("running kmeans!!")  # data driven initialization for the embeddings
+            rp = torch.randperm(flat_x.size(0))
+            kd = kmeans2(
+                flat_x[rp[:20000]].data.cpu().numpy(),
+                self.num_embeddings,
+                minit="points",
+            )
+            self.embedding_table.data.copy_(torch.from_numpy(kd[0].T))
+            self.data_initialized.fill_(1)
+            # TODO: this won't work in multi-GPU setups
+
+        embedding_table = self.embedding_table
+        if self.use_l2_normalization:
+            flat_x = F.normalize(flat_x, p=2, dim=1)
+            embedding_table = F.normalize(embedding_table, p=2, dim=0)
         distances = (
             (flat_x**2).sum(1, keepdim=True)
-            - 2 * flat_x @ self.embedding_table
-            + (self.embedding_table**2).sum(0, keepdim=True)
+            - 2 * flat_x @ embedding_table
+            + (embedding_table**2).sum(0, keepdim=True)
         )
         encoding_indices = distances.argmin(1)
+
         quantized_x = F.embedding(
             encoding_indices.view(x.shape[0], *x.shape[2:]),
             self.embedding_table.transpose(0, 1),
@@ -255,6 +282,11 @@ class VQVAE(nn.Module):
         self._codebook_usage_counts = torch.zeros(
             self._num_embeddings, dtype=torch.int32
         )
+
+    def codebook_selection_entropy(self):
+        probabilities = self.get_codebook_usage_counts(normalize=True)
+        entropy = -torch.sum(probabilities * (torch.log(probabilities + 1e-10)))
+        return entropy.item()
 
     def quantize(self, x):
         z = self.pre_vq_conv(self.encoder(x))

@@ -9,7 +9,7 @@ def main():
 
     segment_folders = []
 
-    for chunk_idx in range(4, 7):
+    for chunk_idx in range(4, 5):
         chunk_path = "/home/fabio/comma2k19/Chunk_" + f"{chunk_idx}"
         print(chunk_path)
         baselevel = len(chunk_path.split(os.path.sep))
@@ -20,7 +20,14 @@ def main():
     output_path = Path(__file__).parent / "output"
     output_path.mkdir(exist_ok=True, parents=True)
 
-    trainer = VqVaeTrainer(segment_folders, output_path, batch_size=15, num_workers=16)
+    trainer = VqVaeTrainer(
+        segment_folders[:100],
+        output_path,
+        batch_size=15,
+        num_workers=20,
+        learning_rate=1e-4,
+        loss_beta=0.1,
+    )
     trainer.train(25)
 
 

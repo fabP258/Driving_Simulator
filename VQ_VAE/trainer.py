@@ -106,7 +106,7 @@ class VqVaeTrainer:
             recon_loss = self._loss_fn(out["x_recon"], x)
             loss = recon_loss + self._loss_beta * out["commitment_loss"]
             loss += out["dictionary_loss"]
-            loss += self._loss_lambda_entropy * out["entropy_loss"]
+            # loss += self._loss_lambda_entropy * out["entropy_loss"]
             overall_epoch_loss += loss.item()
             recon_epoch_loss += recon_loss.item()
             if batch % 1000 == 0:

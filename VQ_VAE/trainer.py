@@ -75,6 +75,7 @@ class VqVaeTrainer:
     def initialize_loss_containers(self):
         self._train_loss = {"reconstruction_loss": [], "overall_loss": []}
         self._test_loss = {"reconstruction_loss": []}
+        self._embedding_entropy = []
 
     def train(self, epochs: int):
 
@@ -88,6 +89,7 @@ class VqVaeTrainer:
             self._test_loss["reconstruction_loss"].append(
                 self.calculate_test_loss(epoch)
             )
+            self._embedding_entropy.append(self._model.codebook_selection_entropy())
             self.generate_loss_plot(suffix=f"ep{epoch}")
             self.plot_codebook_usage(suffix=f"ep{epoch}")
             self._model.reset_codebook_usage_counts()
@@ -143,13 +145,16 @@ class VqVaeTrainer:
         return recon_test_loss
 
     def generate_loss_plot(self, suffix: str = ""):
-        fig, ax = plt.subplots()
-        ax.plot(self._train_loss["reconstruction_loss"], label="Train (recon.)")
-        ax.plot(self._train_loss["overall_loss"], label="Train (sum)")
-        ax.plot(self._test_loss["reconstruction_loss"], label="Test (recon.)")
-        ax.legend()
-        ax.set_xlabel("Epoch [-]")
-        ax.set_ylabel("Loss")
+        fig, ax = plt.subplots(ncols=2)
+        ax[0].plot(self._train_loss["reconstruction_loss"], label="Train (recon.)")
+        ax[0].plot(self._test_loss["reconstruction_loss"], label="Test (recon.)")
+        ax[0].legend()
+        ax[0].set_xlabel("Epoch [-]")
+        ax[0].set_ylabel("Loss")
+
+        ax[1].plot(self._embedding_entropy)
+        ax[1].set_xlabel("Epoch [-]")
+        ax[1].set_ylabel("Embedding selection entropy")
 
         fig.savefig(self._output_path / f"loss_plot_{suffix}.png")
 

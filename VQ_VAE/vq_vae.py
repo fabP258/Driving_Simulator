@@ -285,8 +285,8 @@ class VQVAE(nn.Module):
 
     def codebook_selection_entropy(self):
         probabilities = self.get_codebook_usage_counts(normalize=True)
-        entropy = -torch.sum(probabilities * (torch.log(probabilities + 1e-10)))
-        return entropy.item()
+        entropy = -np.sum(probabilities * (np.log(probabilities + 1e-10)))
+        return entropy
 
     def quantize(self, x):
         z = self.pre_vq_conv(self.encoder(x))

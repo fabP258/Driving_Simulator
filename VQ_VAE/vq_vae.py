@@ -169,14 +169,12 @@ class VectorQuantizer(nn.Module):
         # K means initialization
         # https://github.com/karpathy/deep-vector-quantization/blob/main/dvq/model/quantize.py
         if self.training and self.data_initialized.item() == 0:
-            print("running kmeans!!")  # data driven initialization for the embeddings
-            rp = torch.randperm(flat_x.size(0))
-            kd = kmeans2(
-                flat_x[rp[:20000]].data.cpu().numpy(),
+            centroids, _ = kmeans2(
+                flat_x.data.cpu().numpy(),
                 self.num_embeddings,
                 minit="points",
             )
-            self.embedding_table.data.copy_(torch.from_numpy(kd[0].T))
+            self.embedding_table.data.copy_(torch.from_numpy(centroids.T))
             self.data_initialized.fill_(1)
             # TODO: this won't work in multi-GPU setups
 

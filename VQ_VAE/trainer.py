@@ -23,7 +23,6 @@ class VqVaeTrainer:
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-8,
         loss_beta: float = 0.25,
-        loss_lambda_entropy: float = 0.01,
     ):
 
         # split the segment folders into test and training data
@@ -68,7 +67,6 @@ class VqVaeTrainer:
 
         self._loss_fn = torch.nn.MSELoss()
         self._loss_beta = loss_beta
-        self._loss_lambda_entropy = loss_lambda_entropy
 
         self.initialize_loss_containers()
 
@@ -108,7 +106,6 @@ class VqVaeTrainer:
             recon_loss = self._loss_fn(out["x_recon"], x)
             loss = recon_loss + self._loss_beta * out["commitment_loss"]
             loss += out["dictionary_loss"]
-            # loss += self._loss_lambda_entropy * out["entropy_loss"]
             overall_epoch_loss += loss.item()
             recon_epoch_loss += recon_loss.item()
             if batch % 1000 == 0:

@@ -144,21 +144,50 @@ class Decoder(nn.Module):
         return x_recon
 
 
+class ExponentialMovingAverage(nn.Module):
+
+    def __init__(self, decay, shape):
+        super().__init__()
+        self.decay = decay
+        self.register_buffer("value", torch.zeros(*shape))
+
+    def update(self, new_value):
+        with torch.no_grad():
+            self.value = self.value * self.decay + new_value * (1 - self.decay)
+
+
 class VectorQuantizer(nn.Module):
     def __init__(
-        self, embedding_dim: int, num_embeddings: int, use_l2_normalization: bool = True
+        self,
+        embedding_dim: int,
+        num_embeddings: int,
+        use_l2_normalization: bool,
+        use_ema: bool,
+        ema_decay: float,
+        ema_eps: float,
     ):
         super().__init__()
 
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
         self.use_l2_normalization = use_l2_normalization
+        self.use_ema = use_ema
+        self.ema_eps = ema_eps
 
         # Dictionary embeddings
         limit = 0.5
-        self.embedding_table = nn.Parameter(
-            torch.FloatTensor(embedding_dim, num_embeddings).uniform_(-limit, limit)
+        embedding_table = torch.FloatTensor(embedding_dim, num_embeddings).uniform_(
+            -limit, limit
         )
+        if use_ema:
+            # Will be updated by EMA, not the optimizer
+            self.register_buffer("embedding_table", embedding_table)
+        else:
+            # Wille be updated by the optimizer and therefore needs to be returned by self.parameters()
+            self.register_parameter("embedding_table", embedding_table)
+
+        self.cluster_count_ma = ExponentialMovingAverage(ema_decay, (num_embeddings,))
+        self.embedding_sums = ExponentialMovingAverage(ema_decay, embedding_table.shape)
 
         self.register_buffer("data_initialized", torch.zeros(1))
 
@@ -195,7 +224,9 @@ class VectorQuantizer(nn.Module):
         ).permute(0, 3, 1, 2)
 
         # See second term of Equation (3).
-        dictionary_loss = ((x.detach() - quantized_x) ** 2).mean()
+        dictionary_loss = None
+        if not self.use_ema:
+            dictionary_loss = ((x.detach() - quantized_x) ** 2).mean()
 
         # See third term of Equation (3).
         commitment_loss = ((x - quantized_x.detach()) ** 2).mean()
@@ -210,6 +241,30 @@ class VectorQuantizer(nn.Module):
         entropy_loss = torch.sum(
             codebook_probabilities * torch.log(codebook_probabilities + 1e-10)
         )
+
+        if self.use_ema and self.training:
+            with torch.no_grad():
+                # Cluster count moving average update
+                encoding_one_hots = F.one_hot(
+                    encoding_indices, self.num_embeddings
+                ).type(flat_x.dtype)
+                self.cluster_count_ma.update(encoding_one_hots.sum(0))
+
+                # Embedding moving average update
+                embed_sums = flat_x.transpose(0, 1) @ encoding_one_hots
+                self.embedding_sums.update(embed_sums)
+
+                # apply eps on normalized counts (then denormalize)
+                cluster_count_sum = self.cluster_count_ma.value.sum()
+                nonzero_cluster_counts = (
+                    (self.cluster_count_ma.value + self.ema_eps)
+                    / (cluster_count_sum + self.num_embeddings * self.ema_eps)
+                    * cluster_count_sum
+                )
+
+                self.embedding_table = (
+                    self.embedding_sums.value / nonzero_cluster_counts
+                )
 
         return (
             quantized_x,
@@ -231,6 +286,9 @@ class VQVAE(nn.Module):
         num_residual_hiddens: int,
         embedding_dim: int,
         num_embeddings: int,
+        use_l2_normalization: bool = True,
+        use_ema: bool = True,
+        ema_decay: float = 0.99,
     ):
         super().__init__()
         self.encoder = Encoder(
@@ -243,7 +301,9 @@ class VQVAE(nn.Module):
         self.pre_vq_conv = nn.Conv2d(
             in_channels=num_hiddens, out_channels=embedding_dim, kernel_size=1
         )
-        self.vq = VectorQuantizer(embedding_dim, num_embeddings)
+        self.vq = VectorQuantizer(
+            embedding_dim, num_embeddings, use_l2_normalization, use_ema, ema_decay
+        )
         self.decoder = Decoder(
             embedding_dim,
             num_hiddens,

@@ -105,7 +105,9 @@ class VqVaeTrainer:
             out = self._model(x)
             recon_loss = self._loss_fn(out["x_recon"], x)
             loss = recon_loss + self._loss_beta * out["commitment_loss"]
-            loss += out["dictionary_loss"]
+            dictionary_loss = out["dictionary_loss"]
+            if dictionary_loss is not None:
+                loss += out["dictionary_loss"]
             overall_epoch_loss += loss.item()
             recon_epoch_loss += recon_loss.item()
             if batch % 1000 == 0:

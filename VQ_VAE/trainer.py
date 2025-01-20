@@ -144,16 +144,15 @@ class VqVaeTrainer:
         return recon_test_loss
 
     def generate_loss_plot(self, suffix: str = ""):
-        fig, ax = plt.subplots(ncols=2)
-        ax[0].plot(self._train_loss["reconstruction_loss"], label="Train (recon.)")
-        ax[0].plot(self._test_loss["reconstruction_loss"], label="Test (recon.)")
-        ax[0].legend()
-        ax[0].set_xlabel("Epoch [-]")
-        ax[0].set_ylabel("Loss")
+        fig, ax = plt.subplots()
+        ax.plot(self._train_loss["reconstruction_loss"], label="Train (recon.) loss")
+        ax.plot(self._test_loss["reconstruction_loss"], label="Test (recon.) loss")
+        ax.set_xlabel("Epoch [-]")
+        ax.set_ylabel("Loss")
 
-        ax[1].plot(self._embedding_entropy)
-        ax[1].set_xlabel("Epoch [-]")
-        ax[1].set_ylabel("Embedding selection entropy")
+        axr = ax.twinx()
+        axr.plot(self._embedding_entropy, label="Embedding selection entropy")
+        axr.set_ylabel("Entropy")
 
         fig.savefig(self._output_path / f"loss_plot_{suffix}.png")
 

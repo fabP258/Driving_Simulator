@@ -151,9 +151,9 @@ class ExponentialMovingAverage(nn.Module):
         self.decay = decay
         self.register_buffer("value", torch.zeros(*shape))
 
+    @torch.no_grad()
     def update(self, new_value):
-        with torch.no_grad():
-            self.value = self.value * self.decay + new_value * (1 - self.decay)
+        self.value = self.value * self.decay + new_value * (1 - self.decay)
 
 
 class VectorQuantizer(nn.Module):
@@ -289,6 +289,7 @@ class VQVAE(nn.Module):
         use_l2_normalization: bool = True,
         use_ema: bool = True,
         ema_decay: float = 0.99,
+        ema_eps: float = 1e-5,
     ):
         super().__init__()
         self.encoder = Encoder(
@@ -302,7 +303,12 @@ class VQVAE(nn.Module):
             in_channels=num_hiddens, out_channels=embedding_dim, kernel_size=1
         )
         self.vq = VectorQuantizer(
-            embedding_dim, num_embeddings, use_l2_normalization, use_ema, ema_decay
+            embedding_dim,
+            num_embeddings,
+            use_l2_normalization,
+            use_ema,
+            ema_decay,
+            ema_eps,
         )
         self.decoder = Decoder(
             embedding_dim,

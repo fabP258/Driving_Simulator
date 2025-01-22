@@ -26,9 +26,11 @@ def main():
         batch_size=15,
         num_workers=20,
         learning_rate=1e-4,
-        loss_beta=0.1,
+        loss_beta=0.25,
+        weight_decay=0.001,
+        use_l2_normalization=False,
     )
-    trainer.train(25)
+    trainer.train(50)
 
 
 if __name__ == "__main__":

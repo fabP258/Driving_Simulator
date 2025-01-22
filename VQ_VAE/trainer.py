@@ -23,6 +23,9 @@ class VqVaeTrainer:
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-8,
         loss_beta: float = 0.25,
+        use_l2_normalization: bool = True,
+        use_ema: bool = True,
+        ema_decay: float = 0.9,
     ):
 
         # split the segment folders into test and training data
@@ -56,13 +59,22 @@ class VqVaeTrainer:
             num_downsampling_layers=4,
             num_residual_layers=2,
             num_residual_hiddens=256,
-            embedding_dim=16,
-            num_embeddings=2048,
+            embedding_dim=256,
+            num_embeddings=1024,
+            use_l2_normalization=use_l2_normalization,
+            use_ema=use_ema,
+            ema_decay=ema_decay,
+        )
+        print(
+            f"Model parameters: {sum(p.numel() for p in self._model.parameters() if p.requires_grad)}"
         )
         self._model.to(self._device)
 
         self._optimizer = torch.optim.AdamW(
             self._model.parameters(), lr=learning_rate, weight_decay=weight_decay
+        )
+        self._lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            self._optimizer, step_size=5, gamma=0.1
         )
 
         self._loss_fn = torch.nn.MSELoss()
@@ -84,6 +96,7 @@ class VqVaeTrainer:
             overall_loss, recon_loss = self.train_single_epoch(epoch)
             self._train_loss["overall_loss"].append(overall_loss)
             self._train_loss["reconstruction_loss"].append(recon_loss)
+            self._lr_scheduler.step()
             self._test_loss["reconstruction_loss"].append(
                 self.calculate_test_loss(epoch)
             )
@@ -145,16 +158,26 @@ class VqVaeTrainer:
 
     def generate_loss_plot(self, suffix: str = ""):
         fig, ax = plt.subplots()
-        ax.plot(self._train_loss["reconstruction_loss"], label="Train (recon.) loss")
-        ax.plot(self._test_loss["reconstruction_loss"], label="Test (recon.) loss")
+        (plt1,) = ax.plot(
+            self._train_loss["reconstruction_loss"], label="Train (recon.) loss"
+        )
+        (plt2,) = ax.plot(
+            self._test_loss["reconstruction_loss"], label="Test (recon.) loss"
+        )
         ax.set_xlabel("Epoch [-]")
         ax.set_ylabel("Loss")
 
         axr = ax.twinx()
-        axr.plot(self._embedding_entropy, label="Embedding selection entropy")
+        (plt3,) = axr.plot(
+            self._embedding_entropy, label="Embedding selection entropy", color="k"
+        )
         axr.set_ylabel("Entropy")
 
+        lines = [plt1, plt2, plt3]
+        ax.legend(lines, [line.get_label() for line in lines])
+
         fig.savefig(self._output_path / f"loss_plot_{suffix}.png")
+        plt.close(fig)
 
     def plot_codebook_usage(self, suffix: str = ""):
         codebook_usage_counts = self._model.get_codebook_usage_counts()
@@ -167,6 +190,7 @@ class VqVaeTrainer:
         ax.set_ylabel("Count")
 
         fig.savefig(self._output_path / f"codebook_usage_counts_{suffix}.png")
+        plt.close(fig)
 
     @staticmethod
     def image_tensor_to_array(image: torch.Tensor):
@@ -199,6 +223,7 @@ class VqVaeTrainer:
         output_path.mkdir(parents=True, exist_ok=True)
 
         fig.savefig(output_path / f"image_reconstruction_b{batch:06}.png")
+        plt.close(fig)
 
     @staticmethod
     def split_list(list_to_split: list, shuffle: bool = False, ratio: float = 0.5):

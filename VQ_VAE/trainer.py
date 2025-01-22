@@ -23,6 +23,7 @@ class VqVaeTrainer:
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-8,
         loss_beta: float = 0.25,
+        l1_loss_weight: float = 0.2,
         use_l2_normalization: bool = True,
         use_ema: bool = True,
         ema_decay: float = 0.9,
@@ -57,7 +58,7 @@ class VqVaeTrainer:
             in_channels=3,
             num_hiddens=256,
             num_downsampling_layers=4,
-            num_residual_layers=2,
+            num_residual_layers=4,
             num_residual_hiddens=256,
             embedding_dim=256,
             num_embeddings=1024,
@@ -77,14 +78,17 @@ class VqVaeTrainer:
             self._optimizer, step_size=5, gamma=0.1
         )
 
-        self._loss_fn = torch.nn.MSELoss()
+        self._l2_loss_fn = torch.nn.MSELoss()
+        self._l1_loss_fn = torch.nn.L1Loss()
         self._loss_beta = loss_beta
+        self._l1_loss_weight = l1_loss_weight
 
         self.initialize_loss_containers()
 
     def initialize_loss_containers(self):
         self._train_loss = {
-            "reconstruction_loss": [],
+            "l1_loss": [],
+            "l2_loss": [],
             "commitment_loss": [],
         }
         self._test_loss = {"reconstruction_loss": []}
@@ -96,9 +100,10 @@ class VqVaeTrainer:
 
         for epoch in range(epochs):
             print(f"Epoch {epoch+1}\n-------------------------------")
-            recon_loss, commitment_loss = self.train_single_epoch(epoch)
+            l1_loss, l2_loss, commitment_loss = self.train_single_epoch(epoch)
             self._train_loss["commitment_loss"].append(commitment_loss)
-            self._train_loss["reconstruction_loss"].append(recon_loss)
+            self._train_loss["l1_loss"].append(l1_loss)
+            self._train_loss["l2_loss"].append(l2_loss)
             self._lr_scheduler.step()
             self._test_loss["reconstruction_loss"].append(
                 self.calculate_test_loss(epoch)
@@ -113,20 +118,24 @@ class VqVaeTrainer:
         self._model.train()
 
         commitment_epoch_loss = 0
-        recon_epoch_loss = 0
+        l1_epoch_loss = 0
+        l2_epoch_loss = 0
 
         for batch, x in enumerate(self._train_dataloader):
             self._optimizer.zero_grad()
             x = x.to(self._device)
             out = self._model(x)
-            recon_loss = self._loss_fn(out["x_recon"], x)
+            l1_loss = self._l1_loss_fn(out["x_recon"], x)
+            l2_loss = self._l2_loss_fn(out["x_recon"], x)
+            recon_loss = self._l1_loss_weight * l1_loss + l2_loss
             commitment_loss = self._loss_beta * out["commitment_loss"]
             loss = recon_loss + commitment_loss
             dictionary_loss = out["dictionary_loss"]
             if dictionary_loss is not None:
                 loss += out["dictionary_loss"]
             commitment_epoch_loss += commitment_loss.item()
-            recon_epoch_loss += recon_loss.item()
+            l1_epoch_loss += l1_loss.item()
+            l2_epoch_loss += l2_loss.item()
             if batch % 1000 == 0:
                 print(
                     f"batch loss: {loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
@@ -136,10 +145,11 @@ class VqVaeTrainer:
             self._optimizer.step()
 
         commitment_epoch_loss /= len(self._train_dataloader)
-        recon_epoch_loss /= len(self._train_dataloader)
-        print(f"Mean epoch train reconstruction loss: {recon_epoch_loss}")
+        l1_epoch_loss /= len(self._train_dataloader)
+        l2_epoch_loss /= len(self._train_dataloader)
+        print(f"Mean epoch train reconstruction loss (MSE): {l2_epoch_loss}")
 
-        return recon_epoch_loss, commitment_epoch_loss
+        return l1_epoch_loss, l2_epoch_loss, commitment_epoch_loss
 
     @torch.no_grad
     def calculate_test_loss(self, epoch: int):
@@ -150,7 +160,7 @@ class VqVaeTrainer:
         for batch, x in enumerate(self._test_dataloader):
             x = x.to(self._device)
             out = self._model(x)
-            recon_test_loss += self._loss_fn(out["x_recon"], x).item()
+            recon_test_loss += self._l2_loss_fn(out["x_recon"], x).item()
 
             if batch % 500 == 0:
                 self.plot_sample(x[0, :], out["x_recon"][0, :], epoch, batch, True)
@@ -162,25 +172,24 @@ class VqVaeTrainer:
 
     def generate_loss_plot(self, suffix: str = ""):
         fig, ax = plt.subplots()
-        (plt1,) = ax.plot(
-            self._train_loss["reconstruction_loss"], label="Train (recon.) loss"
-        )
-        (plt2,) = ax.plot(
+        (plt1,) = ax.plot(self._train_loss["l1_loss"], label="Train L1 (recon.) loss")
+        (plt2,) = ax.plot(self._train_loss["l2_loss"], label="Train L2 (recon.) loss")
+        (plt3,) = ax.plot(
             self._train_loss["commitment_loss"], label="Train (commitment) loss"
         )
-        (plt3,) = ax.plot(
-            self._test_loss["reconstruction_loss"], label="Test (recon.) loss"
+        (plt4,) = ax.plot(
+            self._test_loss["reconstruction_loss"], label="Test L2 (recon.) loss"
         )
         ax.set_xlabel("Epoch [-]")
         ax.set_ylabel("Loss")
 
         axr = ax.twinx()
-        (plt4,) = axr.plot(
+        (plt5,) = axr.plot(
             self._embedding_entropy, label="Embedding selection entropy", color="k"
         )
         axr.set_ylabel("Entropy")
 
-        lines = [plt1, plt2, plt3, plt4]
+        lines = [plt1, plt2, plt3, plt4, plt5]
         ax.legend(lines, [line.get_label() for line in lines])
 
         fig.savefig(self._output_path / f"loss_plot_{suffix}.png")

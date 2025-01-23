@@ -106,6 +106,9 @@ class VqVae(nn.Module):
             "x_recon": x_recon,
         }
 
+    def get_last_decoder_layer(self):
+        return self.decoder.upconv[-1].weight
+
     def update_codebook_usage_counts(self, encoding_indices: torch.Tensor):
         flattened_encoding_indices = encoding_indices.flatten().cpu()
         self._codebook_usage_counts += torch.bincount(
@@ -120,7 +123,7 @@ class VqVae(nn.Module):
 
     def reset_codebook_usage_counts(self):
         self._codebook_usage_counts = torch.zeros(
-            self._num_embeddings, dtype=torch.int32
+            self.config.num_embeddings, dtype=torch.int32
         )
 
     def codebook_selection_entropy(self):

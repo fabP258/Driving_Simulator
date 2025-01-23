@@ -83,8 +83,8 @@ class VqVaeTrainer:
         self._l1_loss_fn = torch.nn.L1Loss()
         self._loss_beta = loss_beta
         self._l1_loss_weight = l1_loss_weight
-        self._l2_loss_weight = 2.0
-        self._gan_loss_weight = 0.1
+        self._l2_loss_weight = 1.0
+        self._gan_loss_weight = 1.0
 
         self.initialize_loss_containers()
 
@@ -145,7 +145,13 @@ class VqVaeTrainer:
                 recon_loss = (
                     self._l1_loss_weight * l1_loss + self._l2_loss_weight * l2_loss
                 )
-                gan_loss = self._gan_loss_weight * self._gan_loss(x, out["x_recon"], i)
+                gan_loss = self._gan_loss_weight * self._gan_loss(
+                    x,
+                    out["x_recon"],
+                    i,
+                    recon_loss,
+                    last_layer=self._vq_vae.get_last_decoder_layer(),
+                )
                 commitment_loss = self._loss_beta * out["commitment_loss"]
                 loss = recon_loss + commitment_loss + gan_loss
                 dictionary_loss = out["dictionary_loss"]

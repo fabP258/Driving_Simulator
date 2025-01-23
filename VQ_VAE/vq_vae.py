@@ -1,353 +1,115 @@
-import torch
-import numpy as np
 from pathlib import Path
 
+import torch
+import numpy as np
 from torch import nn
-from torch.nn import functional as F
+from dataclasses import dataclass, asdict
 
-from scipy.cluster.vq import kmeans2
+from encoder import Encoder
+from decoder import Decoder
+from quantizer import VectorQuantizer
 
 
-class ResidualBlock(nn.Module):
+@dataclass
+class VqVaeConfig:
+    in_channels: int = 3
+    num_hiddens: int = 256
+    num_downsampling_layers: int = 4
+    num_residual_layers: int = 4
+    num_residual_hiddens: int = 256
+    embedding_dim: int = 256
+    num_embeddings: int = 1024
+    use_l2_normalization: bool = False
+    use_ema: bool = True
+    ema_decay: float = 0.99
+    ema_eps: float = 1e-5
 
-    def __init__(self, in_channels: int, num_hiddens: int, num_residual_hiddens: int):
+    def encoder_args(self) -> dict:
+        kw_args = {
+            "in_channels": self.in_channels,
+            "num_hiddens": self.num_hiddens,
+            "num_downsampling_layers": self.num_downsampling_layers,
+            "num_residual_layers": self.num_residual_layers,
+            "num_residual_hiddens": self.num_residual_hiddens,
+        }
+        return kw_args
+
+    def decoder_args(self) -> dict:
+        kw_args = {
+            "num_hiddens": self.num_hiddens,
+            "num_upsampling_layers": self.num_downsampling_layers,
+            "num_residual_layers": self.num_residual_layers,
+            "num_residual_hiddens": self.num_residual_hiddens,
+        }
+        return kw_args
+
+    def quantizer_args(self) -> dict:
+        kw_args = {
+            "embedding_dim": self.embedding_dim,
+            "num_embeddings": self.num_embeddings,
+            "use_l2_normalization": self.use_l2_normalization,
+            "use_ema": self.use_ema,
+            "ema_decay": self.ema_decay,
+            "ema_eps": self.ema_eps,
+        }
+        return kw_args
+
+
+class VqVae(nn.Module):
+
+    def __init__(self, config: VqVaeConfig):
         super().__init__()
-        self._block = nn.Sequential(
-            nn.ReLU(True),
-            nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=num_residual_hiddens,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-            ),
-            nn.ReLU(True),
-            nn.Conv2d(
-                in_channels=num_residual_hiddens,
-                out_channels=num_hiddens,
-                kernel_size=1,
-                stride=1,
-                bias=False,
-            ),
+        self.encoder = Encoder(**config.encoder_args())
+        self.pre_quant_conv = nn.Conv2d(
+            in_channels=config.num_hiddens,
+            out_channels=config.embedding_dim,
+            kernel_size=1,
         )
-
-    def forward(self, x):
-        return x + self._block(x)
-
-
-class ResidualStack(nn.Module):
-    def __init__(
-        self,
-        num_hiddens: int,
-        num_residual_layers: int,
-        num_residual_hiddens: int,
-    ):
-        super().__init__()
-        self._num_residual_layers = num_residual_layers
-        self._layers = nn.ModuleList(
-            [
-                ResidualBlock(num_hiddens, num_hiddens, num_residual_hiddens)
-                for _ in range(num_residual_layers)
-            ]
-        )
-
-    def forward(self, x):
-        for layer in self._layers:
-            x = layer(x)
-
-        return torch.relu(x)
-
-
-class Encoder(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        num_hiddens: int,
-        num_downsampling_layers: int,
-        num_residual_layers: int,
-        num_residual_hiddens: int,
-    ):
-        super().__init__()
-
-        conv = nn.Sequential()
-        for downsampling_layer in range(num_downsampling_layers):
-            if downsampling_layer == 0:
-                out_channels = num_hiddens // 2
-            elif downsampling_layer == 1:
-                (in_channels, out_channels) = (num_hiddens // 2, num_hiddens)
-            else:
-                (in_channels, out_channels) = (num_hiddens, num_hiddens)
-
-            conv.add_module(
-                f"down{downsampling_layer}",
-                nn.Conv2d(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    kernel_size=4,
-                    stride=2,
-                    padding=1,
-                ),
-            )
-            conv.add_module(f"relu{downsampling_layer}", nn.ReLU())
-
-        conv.add_module(
-            "final_conv",
-            nn.Conv2d(
-                in_channels=num_hiddens,
-                out_channels=num_hiddens,
-                kernel_size=3,
-                padding=1,
-            ),
-        )
-        self.conv = conv
-        self.residual_stack = ResidualStack(
-            num_hiddens, num_residual_layers, num_residual_hiddens
-        )
-
-    def forward(self, x):
-        h = self.conv(x)
-        return self.residual_stack(h)
-
-
-class Decoder(nn.Module):
-    def __init__(
-        self,
-        embedding_dim: int,
-        num_hiddens: int,
-        num_upsampling_layers: int,
-        num_residual_layers: int,
-        num_residual_hiddens: int,
-    ):
-        super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels=embedding_dim,
-            out_channels=num_hiddens,
+        self.quantizer = VectorQuantizer(**config.quantizer_args())
+        self.post_quant_conv = nn.Conv2d(
+            in_channels=config.embedding_dim,
+            out_channels=config.num_hiddens,
             kernel_size=3,
             padding=1,
         )
-        self.residual_stack = ResidualStack(
-            num_hiddens, num_residual_layers, num_residual_hiddens
+        self.decoder = Decoder(**config.decoder_args())
+
+        # log codebook vector usage counts
+        self._codebook_usage_counts = torch.zeros(
+            config.num_embeddings, dtype=torch.int32
         )
-        upconv = nn.Sequential()
-        for upsampling_layer in range(num_upsampling_layers):
-            if upsampling_layer < num_upsampling_layers - 2:
-                (in_channels, out_channels) = (num_hiddens, num_hiddens)
-            elif upsampling_layer == num_upsampling_layers - 2:
-                (in_channels, out_channels) = (num_hiddens, num_hiddens // 2)
-            else:
-                (in_channels, out_channels) = (num_hiddens // 2, 3)
 
-            upconv.add_module(
-                f"up{upsampling_layer}",
-                nn.ConvTranspose2d(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    kernel_size=4,
-                    stride=2,
-                    padding=1,
-                ),
-            )
-            if upsampling_layer < num_upsampling_layers - 1:
-                upconv.add_module(f"relu{upsampling_layer}", nn.ReLU())
-        self.upconv = upconv
+        self.config: VqVaeConfig = config
 
-    def forward(self, x):
-        h = self.conv(x)
-        h = self.residual_stack(h)
-        x_recon = self.upconv(h)
+    def encode(self, x):
+        h = self.encoder(x)
+        h = self.pre_quant_conv(h)
+        quant, dict_loss, commitment_loss, entropy, enc_indices = self.quantizer(h)
+        return quant, dict_loss, commitment_loss, entropy, enc_indices
+
+    def decode(self, x):
+        h = self.post_quant_conv(x)
+        x_recon = self.decoder(h)
         return x_recon
 
-
-class ExponentialMovingAverage(nn.Module):
-
-    def __init__(self, decay, shape):
-        super().__init__()
-        self.decay = decay
-        self.register_buffer("value", torch.zeros(*shape))
-
-    @torch.no_grad()
-    def update(self, new_value):
-        self.value = self.value * self.decay + new_value * (1 - self.decay)
-
-
-class VectorQuantizer(nn.Module):
-    def __init__(
-        self,
-        embedding_dim: int,
-        num_embeddings: int,
-        use_l2_normalization: bool,
-        use_ema: bool,
-        ema_decay: float,
-        ema_eps: float,
-    ):
-        super().__init__()
-
-        self.embedding_dim = embedding_dim
-        self.num_embeddings = num_embeddings
-        self.use_l2_normalization = use_l2_normalization
-        self.use_ema = use_ema
-        self.ema_eps = ema_eps
-
-        # Dictionary embeddings
-        limit = 0.5
-        embedding_table = torch.FloatTensor(embedding_dim, num_embeddings).uniform_(
-            -limit, limit
-        )
-        if use_ema:
-            # Will be updated by EMA, not the optimizer
-            self.register_buffer("embedding_table", embedding_table)
-        else:
-            # Wille be updated by the optimizer and therefore needs to be returned by self.parameters()
-            self.register_parameter("embedding_table", embedding_table)
-
-        self.cluster_count_ma = ExponentialMovingAverage(ema_decay, (num_embeddings,))
-        self.embedding_sums = ExponentialMovingAverage(ema_decay, embedding_table.shape)
-
-        self.register_buffer("data_initialized", torch.zeros(1))
+    def decode_code(self, code):
+        raise NotImplementedError
 
     def forward(self, x):
-        # [B, C, H, W] -> [B, H, W, C] -> [B x H x W, C]
-        flat_x = x.permute(0, 2, 3, 1).reshape(-1, self.embedding_dim)
-
-        # K means initialization
-        # https://github.com/karpathy/deep-vector-quantization/blob/main/dvq/model/quantize.py
-        if self.training and self.data_initialized.item() == 0:
-            centroids, _ = kmeans2(
-                flat_x.data.cpu().numpy(),
-                self.num_embeddings,
-                minit="points",
-            )
-            self.embedding_table.data.copy_(torch.from_numpy(centroids.T))
-            self.data_initialized.fill_(1)
-            # TODO: this won't work in multi-GPU setups
-
-        embedding_table = self.embedding_table
-        if self.use_l2_normalization:
-            flat_x = F.normalize(flat_x, p=2, dim=1)
-            embedding_table = F.normalize(embedding_table, p=2, dim=0)
-        distances = (
-            (flat_x**2).sum(1, keepdim=True)
-            - 2 * flat_x @ embedding_table
-            + (embedding_table**2).sum(0, keepdim=True)
-        )
-        encoding_indices = distances.argmin(1)
-
-        quantized_x = F.embedding(
-            encoding_indices.view(x.shape[0], *x.shape[2:]),
-            self.embedding_table.transpose(0, 1),
-        ).permute(0, 3, 1, 2)
-
-        # See second term of Equation (3).
-        dictionary_loss = None
-        if not self.use_ema:
-            dictionary_loss = ((x.detach() - quantized_x) ** 2).mean()
-
-        # See third term of Equation (3).
-        commitment_loss = ((x - quantized_x.detach()) ** 2).mean()
-
-        # Straight-through gradient.
-        quantized_x = x + (quantized_x - x).detach()
-
-        # Entropy loss to avoid codebook collapse.
-        codebook_usage_counts = torch.bincount(encoding_indices.flatten())
-        codebook_probabilities = codebook_usage_counts / codebook_usage_counts.sum()
-        # Negative entropy is used for maximaization.
-        entropy_loss = torch.sum(
-            codebook_probabilities * torch.log(codebook_probabilities + 1e-10)
-        )
-
-        if self.use_ema and self.training:
-            with torch.no_grad():
-                # Cluster count moving average update
-                encoding_one_hots = F.one_hot(
-                    encoding_indices, self.num_embeddings
-                ).type(flat_x.dtype)
-                self.cluster_count_ma.update(encoding_one_hots.sum(0))
-
-                # Embedding moving average update
-                embed_sums = flat_x.transpose(0, 1) @ encoding_one_hots
-                self.embedding_sums.update(embed_sums)
-
-                # apply eps on normalized counts (then denormalize)
-                cluster_count_sum = self.cluster_count_ma.value.sum()
-                nonzero_cluster_counts = (
-                    (self.cluster_count_ma.value + self.ema_eps)
-                    / (cluster_count_sum + self.num_embeddings * self.ema_eps)
-                    * cluster_count_sum
-                )
-
-                self.embedding_table = (
-                    self.embedding_sums.value / nonzero_cluster_counts
-                )
-
-        return (
-            quantized_x,
-            dictionary_loss,
-            commitment_loss,
-            entropy_loss,
-            encoding_indices.view(x.shape[0], -1),
-        )
-
-
-class VQVAE(nn.Module):
-
-    def __init__(
-        self,
-        in_channels: int,
-        num_hiddens: int,
-        num_downsampling_layers: int,
-        num_residual_layers: int,
-        num_residual_hiddens: int,
-        embedding_dim: int,
-        num_embeddings: int,
-        use_l2_normalization: bool = True,
-        use_ema: bool = True,
-        ema_decay: float = 0.99,
-        ema_eps: float = 1e-5,
-    ):
-        super().__init__()
-        self.encoder = Encoder(
-            in_channels,
-            num_hiddens,
-            num_downsampling_layers,
-            num_residual_layers,
-            num_residual_hiddens,
-        )
-        self.pre_vq_conv = nn.Conv2d(
-            in_channels=num_hiddens, out_channels=embedding_dim, kernel_size=1
-        )
-        self.vq = VectorQuantizer(
-            embedding_dim,
-            num_embeddings,
-            use_l2_normalization,
-            use_ema,
-            ema_decay,
-            ema_eps,
-        )
-        self.decoder = Decoder(
-            embedding_dim,
-            num_hiddens,
-            num_downsampling_layers,
-            num_residual_layers,
-            num_residual_hiddens,
-        )
-
-        # log codebook vector usage
-        self._codebook_usage_counts = torch.zeros(num_embeddings, dtype=torch.int32)
-
-        # keep args for saving as checkpoint
-        self._in_channels = in_channels
-        self._num_hiddens = num_hiddens
-        self._num_downsampling_layers = num_downsampling_layers
-        self._num_residual_layers = num_residual_layers
-        self._num_residual_hiddens = num_residual_hiddens
-        self._embedding_dim = embedding_dim
-        self._num_embeddings = num_embeddings
+        quant, dict_loss, commitment_loss, entropy, enc_indices = self.encode(x)
+        self.update_codebook_usage_counts(enc_indices)
+        x_recon = self.decode(quant)
+        return {
+            "dictionary_loss": dict_loss,
+            "commitment_loss": commitment_loss,
+            "entropy_loss": entropy,
+            "x_recon": x_recon,
+        }
 
     def update_codebook_usage_counts(self, encoding_indices: torch.Tensor):
         flattened_encoding_indices = encoding_indices.flatten().cpu()
         self._codebook_usage_counts += torch.bincount(
-            flattened_encoding_indices, minlength=self._num_embeddings
+            flattened_encoding_indices, minlength=self.config.num_embeddings
         )
 
     def get_codebook_usage_counts(self, normalize: bool = True):
@@ -366,36 +128,6 @@ class VQVAE(nn.Module):
         entropy = -np.sum(probabilities * (np.log(probabilities + 1e-10)))
         return entropy
 
-    def quantize(self, x):
-        z = self.pre_vq_conv(self.encoder(x))
-        (
-            z_quantized,
-            dictionary_loss,
-            commitment_loss,
-            entropy_loss,
-            encoding_indices,
-        ) = self.vq(z)
-        self.update_codebook_usage_counts(encoding_indices)
-        return (
-            z_quantized,
-            dictionary_loss,
-            commitment_loss,
-            entropy_loss,
-            encoding_indices,
-        )
-
-    def forward(self, x):
-        (z_quantized, dictionary_loss, commitment_loss, entropy_loss, _) = (
-            self.quantize(x)
-        )
-        x_recon = self.decoder(z_quantized)
-        return {
-            "dictionary_loss": dictionary_loss,
-            "commitment_loss": commitment_loss,
-            "entropy_loss": entropy_loss,
-            "x_recon": x_recon,
-        }
-
     def save_checkpoint(
         self,
         output_path: str | Path,
@@ -405,15 +137,7 @@ class VQVAE(nn.Module):
         output = {
             "epoch": epoch,
             "model_state_dict": self.state_dict(),
-            "args": (
-                self._in_channels,
-                self._num_hiddens,
-                self._num_downsampling_layers,
-                self._num_residual_layers,
-                self._num_residual_hiddens,
-                self._embedding_dim,
-                self._num_embeddings,
-            ),
+            "config": asdict(self.config),
         }
 
         file_name = type(self).__name__
@@ -427,6 +151,6 @@ class VQVAE(nn.Module):
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str | Path):
         checkpoint = torch.load(checkpoint_path)
-        model = cls(*checkpoint["args"])
+        model = cls(VqVaeConfig(**checkpoint["config"]))
         model.load_state_dict(checkpoint["model_state_dict"])
         return model

@@ -8,7 +8,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from dataset import DrivingDataset
-from vq_vae import VQVAE
+from vq_vae import VqVae, VqVaeConfig
+from loss import GanLoss
 
 
 class VqVaeTrainer:
@@ -24,9 +25,7 @@ class VqVaeTrainer:
         weight_decay: float = 1e-8,
         loss_beta: float = 0.25,
         l1_loss_weight: float = 0.2,
-        use_l2_normalization: bool = True,
-        use_ema: bool = True,
-        ema_decay: float = 0.9,
+        vq_vae_config: VqVaeConfig = VqVaeConfig(),
     ):
 
         # split the segment folders into test and training data
@@ -54,34 +53,38 @@ class VqVaeTrainer:
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self._model = VQVAE(
-            in_channels=3,
-            num_hiddens=256,
-            num_downsampling_layers=4,
-            num_residual_layers=4,
-            num_residual_hiddens=256,
-            embedding_dim=256,
-            num_embeddings=1024,
-            use_l2_normalization=use_l2_normalization,
-            use_ema=use_ema,
-            ema_decay=ema_decay,
-        )
+        self._vq_vae = VqVae(config=vq_vae_config)
         print(
-            f"Model parameters: {sum(p.numel() for p in self._model.parameters() if p.requires_grad)}"
+            f"VQ-VAE parameters: {sum(p.numel() for p in self._vq_vae.parameters() if p.requires_grad)}"
         )
-        self._model.to(self._device)
+        self._vq_vae.to(self._device)
 
-        self._optimizer = torch.optim.AdamW(
-            self._model.parameters(), lr=learning_rate, weight_decay=weight_decay
+        self._vae_optimizer = torch.optim.AdamW(
+            self._vq_vae.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+            betas=(0.5, 0.9),
         )
-        self._lr_scheduler = torch.optim.lr_scheduler.StepLR(
-            self._optimizer, step_size=5, gamma=0.1
+        self._vae_lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            self._vae_optimizer, step_size=5, gamma=0.1
+        )
+
+        self._gan_loss = GanLoss(num_disc_layers=4, num_disc_hiddens=64)
+        self._gan_loss.to(self._device)
+
+        self._disc_optimizer = torch.optim.AdamW(
+            self._gan_loss.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+            betas=(0.5, 0.9),
         )
 
         self._l2_loss_fn = torch.nn.MSELoss()
         self._l1_loss_fn = torch.nn.L1Loss()
         self._loss_beta = loss_beta
         self._l1_loss_weight = l1_loss_weight
+        self._l2_loss_weight = 2.0
+        self._gan_loss_weight = 0.1
 
         self.initialize_loss_containers()
 
@@ -90,6 +93,7 @@ class VqVaeTrainer:
             "l1_loss": [],
             "l2_loss": [],
             "commitment_loss": [],
+            "gan_loss": {"discriminator": [], "generator": []},
         }
         self._test_loss = {"reconstruction_loss": []}
         self._embedding_entropy = []
@@ -100,66 +104,96 @@ class VqVaeTrainer:
 
         for epoch in range(epochs):
             print(f"Epoch {epoch+1}\n-------------------------------")
-            l1_loss, l2_loss, commitment_loss = self.train_single_epoch(epoch)
+            l1_loss, l2_loss, commitment_loss, gan_loss = self.train_single_epoch(epoch)
             self._train_loss["commitment_loss"].append(commitment_loss)
             self._train_loss["l1_loss"].append(l1_loss)
             self._train_loss["l2_loss"].append(l2_loss)
-            self._lr_scheduler.step()
+            self._train_loss["gan_loss"]["discriminator"].append(
+                gan_loss["discriminator"]
+            )
+            self._train_loss["gan_loss"]["generator"].append(gan_loss["generator"])
+
+            self._vae_lr_scheduler.step()
             self._test_loss["reconstruction_loss"].append(
                 self.calculate_test_loss(epoch)
             )
-            self._embedding_entropy.append(self._model.codebook_selection_entropy())
+            self._embedding_entropy.append(self._vq_vae.codebook_selection_entropy())
             self.generate_loss_plot(suffix=f"ep{epoch}")
             self.plot_codebook_usage(suffix=f"ep{epoch}")
-            self._model.reset_codebook_usage_counts()
-            self._model.save_checkpoint(self._output_path, epoch)
+            self._vq_vae.reset_codebook_usage_counts()
+            self._vq_vae.save_checkpoint(self._output_path, epoch)
 
     def train_single_epoch(self, epoch: int):
-        self._model.train()
+        self._vq_vae.train()
+        self._gan_loss.train()
 
         commitment_epoch_loss = 0
         l1_epoch_loss = 0
         l2_epoch_loss = 0
+        gan_epoch_loss = {"discriminator": 0, "generator": 0}
 
         for batch, x in enumerate(self._train_dataloader):
-            self._optimizer.zero_grad()
-            x = x.to(self._device)
-            out = self._model(x)
-            l1_loss = self._l1_loss_fn(out["x_recon"], x)
-            l2_loss = self._l2_loss_fn(out["x_recon"], x)
-            recon_loss = self._l1_loss_weight * l1_loss + l2_loss
-            commitment_loss = self._loss_beta * out["commitment_loss"]
-            loss = recon_loss + commitment_loss
-            dictionary_loss = out["dictionary_loss"]
-            if dictionary_loss is not None:
-                loss += out["dictionary_loss"]
-            commitment_epoch_loss += commitment_loss.item()
-            l1_epoch_loss += l1_loss.item()
-            l2_epoch_loss += l2_loss.item()
-            if batch % 1000 == 0:
-                print(
-                    f"batch loss: {loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
+            for i in range(2):
+                self._vae_optimizer.zero_grad()
+                self._disc_optimizer.zero_grad()
+                x = x.to(self._device)
+                out = self._vq_vae(x)
+
+                # sum up loss
+                l1_loss = self._l1_loss_fn(out["x_recon"], x)
+                l2_loss = self._l2_loss_fn(out["x_recon"], x)
+                recon_loss = (
+                    self._l1_loss_weight * l1_loss + self._l2_loss_weight * l2_loss
                 )
-                self.plot_sample(x[0, :], out["x_recon"][0, :], epoch, batch, False)
-            loss.backward()
-            self._optimizer.step()
+                gan_loss = self._gan_loss_weight * self._gan_loss(x, out["x_recon"], i)
+                commitment_loss = self._loss_beta * out["commitment_loss"]
+                loss = recon_loss + commitment_loss + gan_loss
+                dictionary_loss = out["dictionary_loss"]
+                if dictionary_loss is not None:
+                    loss += out["dictionary_loss"]
+
+                loss.backward()
+
+                if i == 0:
+                    # "Generator update"
+                    self._vae_optimizer.step()
+
+                    commitment_epoch_loss += commitment_loss.item()
+                    l1_epoch_loss += l1_loss.item()
+                    l2_epoch_loss += l2_loss.item()
+                    gan_epoch_loss["generator"] += gan_loss.item()
+                    if batch % 1000 == 0:
+                        print(
+                            f"batch loss: {loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
+                        )
+                        self.plot_sample(
+                            x[0, :], out["x_recon"][0, :], epoch, batch, False
+                        )
+
+                if i == 1:
+                    # Discriminator update
+                    self._disc_optimizer.step()
+                    gan_epoch_loss["discriminator"] += gan_loss.item()
 
         commitment_epoch_loss /= len(self._train_dataloader)
         l1_epoch_loss /= len(self._train_dataloader)
         l2_epoch_loss /= len(self._train_dataloader)
+        gan_epoch_loss["generator"] /= len(self._train_dataloader)
+        gan_epoch_loss["discriminator"] /= len(self._train_dataloader)
         print(f"Mean epoch train reconstruction loss (MSE): {l2_epoch_loss}")
 
-        return l1_epoch_loss, l2_epoch_loss, commitment_epoch_loss
+        return l1_epoch_loss, l2_epoch_loss, commitment_epoch_loss, gan_epoch_loss
 
     @torch.no_grad
     def calculate_test_loss(self, epoch: int):
-        self._model.eval()
+        self._vq_vae.eval()
+        self._gan_loss.eval()
 
         recon_test_loss = 0
 
         for batch, x in enumerate(self._test_dataloader):
             x = x.to(self._device)
-            out = self._model(x)
+            out = self._vq_vae(x)
             recon_test_loss += self._l2_loss_fn(out["x_recon"], x).item()
 
             if batch % 500 == 0:
@@ -178,25 +212,33 @@ class VqVaeTrainer:
             self._train_loss["commitment_loss"], label="Train (commitment) loss"
         )
         (plt4,) = ax.plot(
+            self._train_loss["gan_loss"]["generator"], label="Generator GAN loss"
+        )
+        (plt5,) = ax.plot(
+            self._train_loss["gan_loss"]["discriminator"],
+            label="Discriminator GAN loss",
+        )
+
+        (plt6,) = ax.plot(
             self._test_loss["reconstruction_loss"], label="Test L2 (recon.) loss"
         )
         ax.set_xlabel("Epoch [-]")
         ax.set_ylabel("Loss")
 
         axr = ax.twinx()
-        (plt5,) = axr.plot(
+        (plt7,) = axr.plot(
             self._embedding_entropy, label="Embedding selection entropy", color="k"
         )
         axr.set_ylabel("Entropy")
 
-        lines = [plt1, plt2, plt3, plt4, plt5]
+        lines = [plt1, plt2, plt3, plt4, plt5, plt6, plt7]
         ax.legend(lines, [line.get_label() for line in lines])
 
         fig.savefig(self._output_path / f"loss_plot_{suffix}.png")
         plt.close(fig)
 
     def plot_codebook_usage(self, suffix: str = ""):
-        codebook_usage_counts = self._model.get_codebook_usage_counts()
+        codebook_usage_counts = self._vq_vae.get_codebook_usage_counts()
         fig, ax = plt.subplots()
         ax.scatter(
             x=list(range(len(codebook_usage_counts))),

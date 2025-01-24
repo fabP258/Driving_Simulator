@@ -5,19 +5,12 @@ from resnet import ResidualStack
 class Decoder(nn.Module):
     def __init__(
         self,
-        # embedding_dim: int,
         num_hiddens: int,
         num_upsampling_layers: int,
         num_residual_layers: int,
         num_residual_hiddens: int,
     ):
         super().__init__()
-        # self.conv = nn.Conv2d(
-        #    in_channels=embedding_dim,
-        #    out_channels=num_hiddens,
-        #    kernel_size=3,
-        #    padding=1,
-        # )
         self.residual_stack = ResidualStack(
             num_hiddens, num_residual_layers, num_residual_hiddens
         )
@@ -45,7 +38,6 @@ class Decoder(nn.Module):
         self.upconv = upconv
 
     def forward(self, x):
-        # h = self.conv(x)
         h = self.residual_stack(x)
         x_recon = self.upconv(h)
         return x_recon

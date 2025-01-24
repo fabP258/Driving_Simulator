@@ -6,10 +6,16 @@ import matplotlib.pyplot as plt
 
 import torch
 from torch.utils.data import DataLoader
+from lpips import LPIPS
 
 from dataset import DrivingDataset
 from vq_vae import VqVae, VqVaeConfig
-from loss import GanLoss
+from discriminator import Discriminator
+
+
+def normalize_image(x: torch.Tensor) -> torch.Tensor:
+    """Normalizes image from range [0, 1] to [-1,1]"""
+    return x * 2 - 1
 
 
 class VqVaeTrainer:
@@ -54,9 +60,7 @@ class VqVaeTrainer:
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
 
         self._vq_vae = VqVae(config=vq_vae_config)
-        print(
-            f"VQ-VAE parameters: {sum(p.numel() for p in self._vq_vae.parameters() if p.requires_grad)}"
-        )
+        VqVaeTrainer.print_num_parameters("VQ-VAE", self._vq_vae)
         self._vq_vae.to(self._device)
 
         self._vae_optimizer = torch.optim.AdamW(
@@ -69,11 +73,14 @@ class VqVaeTrainer:
             self._vae_optimizer, step_size=5, gamma=0.1
         )
 
-        self._gan_loss = GanLoss(num_disc_layers=4, num_disc_hiddens=128)
-        self._gan_loss.to(self._device)
+        self._discriminator = Discriminator(
+            in_channels=3, num_layers=4, num_hiddens=128
+        )
+        VqVaeTrainer.print_num_parameters("Discriminator", self._discriminator)
+        self._discriminator.to(self._device)
 
         self._disc_optimizer = torch.optim.AdamW(
-            self._gan_loss.parameters(),
+            self._discriminator.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay,
             betas=(0.5, 0.9),
@@ -84,9 +91,12 @@ class VqVaeTrainer:
 
         self._l2_loss_fn = torch.nn.MSELoss()
         self._l1_loss_fn = torch.nn.L1Loss()
+        self._perceptual_loss = LPIPS(net="vgg").eval().to(self._device)
+        self._gan_loss_fn = torch.nn.BCEWithLogitsLoss()
         self._loss_beta = loss_beta
         self._l1_loss_weight = l1_loss_weight
         self._l2_loss_weight = 0.0
+        self._perceptual_loss_weight = 0.1
         self._gan_loss_weight = 1.0
 
         self.initialize_loss_containers()
@@ -95,11 +105,19 @@ class VqVaeTrainer:
         self._train_loss = {
             "l1_loss": [],
             "l2_loss": [],
+            "perceptual_loss": [],
             "commitment_loss": [],
             "gan_loss": {"discriminator": [], "generator": []},
         }
         self._test_loss = {"reconstruction_loss": []}
         self._embedding_entropy = []
+
+    @staticmethod
+    def print_num_parameters(name: str, model: torch.nn.Module):
+        """Print the name and the number of paramaters for a given model."""
+        print(
+            f"{name} parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
+        )
 
     def train(self, epochs: int):
 
@@ -107,10 +125,13 @@ class VqVaeTrainer:
 
         for epoch in range(epochs):
             print(f"Epoch {epoch+1}\n-------------------------------")
-            l1_loss, l2_loss, commitment_loss, gan_loss = self.train_single_epoch(epoch)
+            l1_loss, l2_loss, perceptual_loss, commitment_loss, gan_loss = (
+                self.train_single_epoch(epoch)
+            )
             self._train_loss["commitment_loss"].append(commitment_loss)
             self._train_loss["l1_loss"].append(l1_loss)
             self._train_loss["l2_loss"].append(l2_loss)
+            self._train_loss["perceptual_loss"].append(perceptual_loss)
             self._train_loss["gan_loss"]["discriminator"].append(
                 gan_loss["discriminator"]
             )
@@ -128,82 +149,116 @@ class VqVaeTrainer:
 
     def train_single_epoch(self, epoch: int):
         self._vq_vae.train()
-        self._gan_loss.train()
+        self._discriminator.train()
 
         commitment_epoch_loss = 0
         l1_epoch_loss = 0
         l2_epoch_loss = 0
+        perceptual_epoch_loss = 0
         gan_epoch_loss = {"discriminator": 0, "generator": 0}
 
         for batch, x in enumerate(self._train_dataloader):
-            for i in range(2):
-                self._vae_optimizer.zero_grad()
-                self._disc_optimizer.zero_grad()
-                x = x.to(self._device)
-                out = self._vq_vae(x)
+            x = x.to(self._device)
 
-                # sum up loss
-                l1_loss = self._l1_loss_fn(out["x_recon"], x)
-                l2_loss = self._l2_loss_fn(out["x_recon"], x)
-                recon_loss = (
-                    self._l1_loss_weight * l1_loss + self._l2_loss_weight * l2_loss
+            # forward pass (VAE + Discriminator)
+            out = self._vq_vae(x)
+            disc_logits_real = self._discriminator(x)
+            disc_logits_fake = self._discriminator(out["x_recon"])
+
+            # sum up loss
+            l1_loss = self._l1_loss_fn(out["x_recon"], x)
+            l2_loss = self._l2_loss_fn(out["x_recon"], x)
+            perceptual_loss = torch.squeeze(
+                self._perceptual_loss(
+                    normalize_image(out["x_recon"]), normalize_image(x)
                 )
-                gan_loss = self._gan_loss_weight * self._gan_loss(
-                    x,
-                    out["x_recon"],
-                    i,
-                    recon_loss,
-                    last_layer=self._vq_vae.get_last_decoder_layer(),
+            ).mean()
+            recon_loss = (
+                self._l1_loss_weight * l1_loss
+                + self._l2_loss_weight * l2_loss
+                + self._perceptual_loss_weight * perceptual_loss
+            )
+
+            commitment_loss = self._loss_beta * out["commitment_loss"]
+
+            generator_loss = self._gan_loss_fn(
+                disc_logits_fake, torch.zeros_like(disc_logits_fake)
+            )
+            gan_loss_weight = self._vq_vae.calculate_adaptive_weight(
+                recon_loss, generator_loss
+            )
+
+            vae_loss = (
+                recon_loss
+                + commitment_loss
+                + generator_loss * gan_loss_weight * self._gan_loss_weight
+            )
+            dictionary_loss = out["dictionary_loss"]
+            if dictionary_loss is not None:
+                vae_loss += out["dictionary_loss"]
+
+            # optimize VAE
+            self._vae_optimizer.zero_grad()
+            vae_loss.backward()
+            self._vae_optimizer.step()
+
+            # Discriminator loss
+            disc_loss_real = self._gan_loss_fn(
+                disc_logits_real, torch.ones_like(disc_logits_real)
+            )
+            # might be clever to recompute fake logits with x_recon.detach()?
+            disc_logits_fake = self._discriminator(out["x_recon"].detach())
+            disc_loss_fake = self._gan_loss_fn(
+                disc_logits_fake, torch.zeros_like(disc_logits_fake)
+            )
+            disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
+
+            # Optimize discriminator
+            self._disc_optimizer.zero_grad()
+            disc_loss.backward()
+            self._disc_optimizer.step()
+
+            # Logging
+            commitment_epoch_loss += commitment_loss.item()
+            l1_epoch_loss += l1_loss.item()
+            l2_epoch_loss += l2_loss.item()
+            perceptual_epoch_loss += perceptual_loss.item()
+            gan_epoch_loss["generator"] += generator_loss.item()
+            gan_epoch_loss["discriminator"] += disc_loss.item()
+
+            if batch % 1000 == 0:
+                print(
+                    f"batch loss: {recon_loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
                 )
-                commitment_loss = self._loss_beta * out["commitment_loss"]
-                loss = recon_loss + commitment_loss + gan_loss
-                dictionary_loss = out["dictionary_loss"]
-                if dictionary_loss is not None:
-                    loss += out["dictionary_loss"]
-
-                loss.backward()
-
-                if i == 0:
-                    # "Generator update"
-                    self._vae_optimizer.step()
-
-                    commitment_epoch_loss += commitment_loss.item()
-                    l1_epoch_loss += l1_loss.item()
-                    l2_epoch_loss += l2_loss.item()
-                    gan_epoch_loss["generator"] += gan_loss.item()
-                    if batch % 1000 == 0:
-                        print(
-                            f"batch loss: {loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
-                        )
-                        self.plot_sample(
-                            x[0, :], out["x_recon"][0, :], epoch, batch, False
-                        )
-
-                if i == 1:
-                    # Discriminator update
-                    self._disc_optimizer.step()
-                    gan_epoch_loss["discriminator"] += gan_loss.item()
+                self.plot_sample(x[0, :], out["x_recon"][0, :], epoch, batch, False)
 
         commitment_epoch_loss /= len(self._train_dataloader)
         l1_epoch_loss /= len(self._train_dataloader)
         l2_epoch_loss /= len(self._train_dataloader)
+        perceptual_epoch_loss /= len(self._train_dataloader)
         gan_epoch_loss["generator"] /= len(self._train_dataloader)
         gan_epoch_loss["discriminator"] /= len(self._train_dataloader)
-        print(f"Mean epoch train reconstruction loss (MSE): {l2_epoch_loss}")
+        print(f"Mean epoch train reconstruction loss (L1): {l1_epoch_loss}")
 
-        return l1_epoch_loss, l2_epoch_loss, commitment_epoch_loss, gan_epoch_loss
+        return (
+            l1_epoch_loss,
+            l2_epoch_loss,
+            perceptual_epoch_loss,
+            commitment_epoch_loss,
+            gan_epoch_loss,
+        )
 
     @torch.no_grad
     def calculate_test_loss(self, epoch: int):
         self._vq_vae.eval()
-        self._gan_loss.eval()
+        self._discriminator.eval()
 
         recon_test_loss = 0
 
         for batch, x in enumerate(self._test_dataloader):
             x = x.to(self._device)
             out = self._vq_vae(x)
-            recon_test_loss += self._l2_loss_fn(out["x_recon"], x).item()
+            recon_test_loss += self._l1_loss_fn(out["x_recon"], x).item()
 
             if batch % 500 == 0:
                 self.plot_sample(x[0, :], out["x_recon"][0, :], epoch, batch, True)
@@ -217,30 +272,31 @@ class VqVaeTrainer:
         fig, ax = plt.subplots()
         (plt1,) = ax.plot(self._train_loss["l1_loss"], label="Train L1 (recon.) loss")
         (plt2,) = ax.plot(self._train_loss["l2_loss"], label="Train L2 (recon.) loss")
-        (plt3,) = ax.plot(
+        (plt3,) = ax.plot(self._train_loss["perceptual_loss"], label="Perceptual loss")
+        (plt4,) = ax.plot(
             self._train_loss["commitment_loss"], label="Train (commitment) loss"
         )
-        (plt4,) = ax.plot(
+        (plt5,) = ax.plot(
             self._train_loss["gan_loss"]["generator"], label="Generator GAN loss"
         )
-        (plt5,) = ax.plot(
+        (plt6,) = ax.plot(
             self._train_loss["gan_loss"]["discriminator"],
             label="Discriminator GAN loss",
         )
 
-        (plt6,) = ax.plot(
-            self._test_loss["reconstruction_loss"], label="Test L2 (recon.) loss"
+        (plt7,) = ax.plot(
+            self._test_loss["reconstruction_loss"], label="Test L1 (recon.) loss"
         )
         ax.set_xlabel("Epoch [-]")
         ax.set_ylabel("Loss")
 
         axr = ax.twinx()
-        (plt7,) = axr.plot(
+        (plt8,) = axr.plot(
             self._embedding_entropy, label="Embedding selection entropy", color="k"
         )
         axr.set_ylabel("Entropy")
 
-        lines = [plt1, plt2, plt3, plt4, plt5, plt6, plt7]
+        lines = [plt1, plt2, plt3, plt4, plt5, plt6, plt7, plt8]
         ax.legend(lines, [line.get_label() for line in lines])
 
         fig.savefig(self._output_path / f"loss_plot_{suffix}.png")

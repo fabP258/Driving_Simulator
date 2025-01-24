@@ -106,6 +106,15 @@ class VqVae(nn.Module):
             "x_recon": x_recon,
         }
 
+    def calculate_adaptive_weight(self, rec_loss, gen_loss):
+        last_layer = self.get_last_decoder_layer()
+        rec_grads = torch.autograd.grad(rec_loss, last_layer, retain_graph=True)[0]
+        gen_grads = torch.autograd.grad(gen_loss, last_layer, retain_graph=True)[0]
+
+        d_weight = torch.norm(rec_grads) / (torch.norm(gen_grads) + 1e-4)
+        d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
+        return d_weight
+
     def get_last_decoder_layer(self):
         return self.decoder.upconv[-1].weight
 

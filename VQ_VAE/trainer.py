@@ -24,7 +24,7 @@ class VqVaeTrainer:
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-8,
         loss_beta: float = 0.25,
-        l1_loss_weight: float = 0.2,
+        l1_loss_weight: float = 1.0,
         vq_vae_config: VqVaeConfig = VqVaeConfig(),
     ):
 
@@ -69,7 +69,7 @@ class VqVaeTrainer:
             self._vae_optimizer, step_size=5, gamma=0.1
         )
 
-        self._gan_loss = GanLoss(num_disc_layers=4, num_disc_hiddens=64)
+        self._gan_loss = GanLoss(num_disc_layers=4, num_disc_hiddens=128)
         self._gan_loss.to(self._device)
 
         self._disc_optimizer = torch.optim.AdamW(
@@ -78,12 +78,15 @@ class VqVaeTrainer:
             weight_decay=weight_decay,
             betas=(0.5, 0.9),
         )
+        self._disc_lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            self._disc_optimizer, step_size=5, gamma=0.1
+        )
 
         self._l2_loss_fn = torch.nn.MSELoss()
         self._l1_loss_fn = torch.nn.L1Loss()
         self._loss_beta = loss_beta
         self._l1_loss_weight = l1_loss_weight
-        self._l2_loss_weight = 1.0
+        self._l2_loss_weight = 0.0
         self._gan_loss_weight = 1.0
 
         self.initialize_loss_containers()

@@ -19,7 +19,7 @@ $ cd VQ_VAE
 $ python train.py
 ```
 
-## Implemented feature
+## Implemented features
 
 ### VQ-VAE
 

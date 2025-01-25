@@ -15,11 +15,11 @@ class VqVaeConfig:
     in_channels: int = 3
     num_hiddens: int = 256
     num_downsampling_layers: int = 4
-    num_residual_layers: int = 4
+    num_residual_layers: int = 8
     num_residual_hiddens: int = 256
     embedding_dim: int = 256
-    num_embeddings: int = 1024
-    use_l2_normalization: bool = False
+    num_embeddings: int = 2048
+    use_l2_normalization: bool = True
     use_ema: bool = True
     ema_decay: float = 0.99
     ema_eps: float = 1e-5

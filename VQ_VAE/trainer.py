@@ -30,7 +30,7 @@ class VqVaeTrainer:
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-8,
         loss_beta: float = 0.25,
-        l1_loss_weight: float = 1.0,
+        l1_loss_weight: float = 0.2,
         vq_vae_config: VqVaeConfig = VqVaeConfig(),
     ):
 
@@ -95,7 +95,7 @@ class VqVaeTrainer:
         self._gan_loss_fn = torch.nn.BCEWithLogitsLoss()
         self._loss_beta = loss_beta
         self._l1_loss_weight = l1_loss_weight
-        self._l2_loss_weight = 0.0
+        self._l2_loss_weight = 2.0
         self._perceptual_loss_weight = 0.1
         self._gan_loss_weight = 1.0
 

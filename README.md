@@ -1,6 +1,8 @@
 # Driving_Simulator
 A PyTorch based training framework for a Machine Learning Driving Simulator like the GAIA-1 [4]. Currently only a VQ-GAN image tokenizer is implemented. A transformer-based, action-conditioned world model will follow soon.
 
+<img src="img/VQ_GAN.png" alt="Architecture">
+
 ## Getting started
 
 ### Setup conda environment

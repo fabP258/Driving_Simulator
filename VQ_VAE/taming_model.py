@@ -1,29 +1,6 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from dataclasses import dataclass
-
-
-@dataclass
-class CompressorConfig:
-    in_channels: int = 3
-    out_channels: int = 3
-    ch_mult: tuple[int] = (1, 1, 2, 2, 4)
-    attn_resolutions: tuple[int] = (16,)
-    resolution: int = 256
-    num_res_blocks: int = 2
-    z_channels: int = 256
-    vocab_size: int = 1024
-    ch: int = 128
-    dropout: float = 0.0
-
-    @property
-    def num_resolutions(self):
-        return len(self.ch_mult)
-
-    @property
-    def quantized_resolution(self):
-        return self.resolution // 2 ** (self.num_resolutions - 1)
 
 
 def nonlinearity(x):

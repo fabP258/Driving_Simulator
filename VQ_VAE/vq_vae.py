@@ -6,9 +6,7 @@ import numpy as np
 from torch import nn
 from dataclasses import dataclass, asdict
 
-# from encoder import Encoder
-# from decoder import Decoder
-from taming_model import Encoder, Decoder, CompressorConfig
+from taming_model import Encoder, Decoder
 
 from quantizer import VectorQuantizer
 

@@ -1,52 +1,55 @@
 from pathlib import Path
+from pathlib import Path
 
 import torch
 import numpy as np
 from torch import nn
 from dataclasses import dataclass, asdict
 
-from encoder import Encoder
-from decoder import Decoder
+# from encoder import Encoder
+# from decoder import Decoder
+from taming_model import Encoder, Decoder, CompressorConfig
+
 from quantizer import VectorQuantizer
 
 
 @dataclass
 class VqVaeConfig:
     in_channels: int = 3
-    num_hiddens: int = 256
-    num_downsampling_layers: int = 4
-    num_residual_layers: int = 8
-    num_residual_hiddens: int = 256
-    embedding_dim: int = 256
-    num_embeddings: int = 2048
+    out_channels: int = 3
+    ch_mult: tuple[int] = (1, 1, 2, 2, 4)
+    attn_resolutions: tuple[int] = (16,)
+    resolution: int = 256
+    num_res_blocks: int = 2
+    z_channels: int = 256
+    vocab_size: int = 1024
+    ch: int = 128
+    dropout: float = 0.0
+    double_z: bool = True
+    embedding_dim: int = 128
     use_l2_normalization: bool = True
     use_ema: bool = True
     ema_decay: float = 0.99
     ema_eps: float = 1e-5
 
-    def encoder_args(self) -> dict:
+    def encoder_decoder_args(self) -> dict:
         kw_args = {
+            "ch": self.ch,
+            "out_ch": self.out_channels,
+            "ch_mult": self.ch_mult,
+            "num_res_blocks": self.num_res_blocks,
+            "attn_resolutions": self.attn_resolutions,
+            "dropout": self.dropout,
             "in_channels": self.in_channels,
-            "num_hiddens": self.num_hiddens,
-            "num_downsampling_layers": self.num_downsampling_layers,
-            "num_residual_layers": self.num_residual_layers,
-            "num_residual_hiddens": self.num_residual_hiddens,
-        }
-        return kw_args
-
-    def decoder_args(self) -> dict:
-        kw_args = {
-            "num_hiddens": self.num_hiddens,
-            "num_upsampling_layers": self.num_downsampling_layers,
-            "num_residual_layers": self.num_residual_layers,
-            "num_residual_hiddens": self.num_residual_hiddens,
+            "resolution": self.resolution,
+            "z_channels": self.z_channels,
         }
         return kw_args
 
     def quantizer_args(self) -> dict:
         kw_args = {
             "embedding_dim": self.embedding_dim,
-            "num_embeddings": self.num_embeddings,
+            "num_embeddings": self.vocab_size,
             "use_l2_normalization": self.use_l2_normalization,
             "use_ema": self.use_ema,
             "ema_decay": self.ema_decay,
@@ -59,25 +62,23 @@ class VqVae(nn.Module):
 
     def __init__(self, config: VqVaeConfig):
         super().__init__()
-        self.encoder = Encoder(**config.encoder_args())
+        self.encoder = Encoder(**config.encoder_decoder_args())
         self.pre_quant_conv = nn.Conv2d(
-            in_channels=config.num_hiddens,
+            in_channels=2 * config.z_channels if config.double_z else config.z_channels,
             out_channels=config.embedding_dim,
             kernel_size=1,
         )
         self.quantizer = VectorQuantizer(**config.quantizer_args())
         self.post_quant_conv = nn.Conv2d(
             in_channels=config.embedding_dim,
-            out_channels=config.num_hiddens,
+            out_channels=config.z_channels,
             kernel_size=3,
             padding=1,
         )
-        self.decoder = Decoder(**config.decoder_args())
+        self.decoder = Decoder(**config.encoder_decoder_args())
 
         # log codebook vector usage counts
-        self._codebook_usage_counts = torch.zeros(
-            config.num_embeddings, dtype=torch.int32
-        )
+        self._codebook_usage_counts = torch.zeros(config.vocab_size, dtype=torch.int32)
 
         self.config: VqVaeConfig = config
 
@@ -116,12 +117,12 @@ class VqVae(nn.Module):
         return d_weight
 
     def get_last_decoder_layer(self):
-        return self.decoder.upconv[-1].weight
+        return self.decoder.conv_out.weight
 
     def update_codebook_usage_counts(self, encoding_indices: torch.Tensor):
         flattened_encoding_indices = encoding_indices.flatten().cpu()
         self._codebook_usage_counts += torch.bincount(
-            flattened_encoding_indices, minlength=self.config.num_embeddings
+            flattened_encoding_indices, minlength=self.config.vocab_size
         )
 
     def get_codebook_usage_counts(self, normalize: bool = True):
@@ -132,7 +133,7 @@ class VqVae(nn.Module):
 
     def reset_codebook_usage_counts(self):
         self._codebook_usage_counts = torch.zeros(
-            self.config.num_embeddings, dtype=torch.int32
+            self.config.vocab_size, dtype=torch.int32
         )
 
     def codebook_selection_entropy(self):

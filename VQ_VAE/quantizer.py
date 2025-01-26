@@ -59,6 +59,7 @@ class VectorQuantizer(nn.Module):
         # K means initialization
         # https://github.com/karpathy/deep-vector-quantization/blob/main/dvq/model/quantize.py
         if self.training and self.data_initialized.item() == 0:
+            # Note: This only works for flat_x.shape[0] >= self.num_embeddings!
             centroids, _ = kmeans2(
                 flat_x.data.cpu().numpy(),
                 self.num_embeddings,

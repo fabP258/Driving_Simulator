@@ -182,7 +182,7 @@ class VqVaeTrainer:
             commitment_loss = self._loss_beta * out["commitment_loss"]
 
             generator_loss = self._gan_loss_fn(
-                disc_logits_fake, torch.zeros_like(disc_logits_fake)
+                disc_logits_fake, torch.ones_like(disc_logits_fake)
             )
             gan_loss_weight = self._vq_vae.calculate_adaptive_weight(
                 recon_loss, generator_loss

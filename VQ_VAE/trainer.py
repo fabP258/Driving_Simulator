@@ -206,7 +206,6 @@ class VqVaeTrainer:
             disc_loss_real = self._gan_loss_fn(
                 disc_logits_real, torch.ones_like(disc_logits_real)
             )
-            # might be clever to recompute fake logits with x_recon.detach()?
             disc_logits_fake = self._discriminator(out["x_recon"].detach())
             disc_loss_fake = self._gan_loss_fn(
                 disc_logits_fake, torch.zeros_like(disc_logits_fake)
@@ -230,7 +229,15 @@ class VqVaeTrainer:
                 print(
                     f"batch loss: {recon_loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
                 )
-                self.plot_sample(x[0, :], out["x_recon"][0, :], epoch, batch, False)
+                self.plot_sample(
+                    x[0, :],
+                    out["x_recon"][0, :],
+                    torch.sigmoid(disc_logits_real[0, 0, :]),
+                    torch.sigmoid(disc_logits_fake[0, 0, :]),
+                    epoch,
+                    batch,
+                    False,
+                )
 
         commitment_epoch_loss /= len(self._train_dataloader)
         l1_epoch_loss /= len(self._train_dataloader)
@@ -260,8 +267,19 @@ class VqVaeTrainer:
             out = self._vq_vae(x)
             recon_test_loss += self._l1_loss_fn(out["x_recon"], x).item()
 
+            disc_logits_real = self._discriminator(x)
+            disc_logits_fake = self._discriminator(out["x_recon"])
+
             if batch % 500 == 0:
-                self.plot_sample(x[0, :], out["x_recon"][0, :], epoch, batch, True)
+                self.plot_sample(
+                    x[0, :],
+                    out["x_recon"][0, :],
+                    torch.sigmoid(disc_logits_real[0, 0, :]),
+                    torch.sigmoid(disc_logits_fake[0, 0, :]),
+                    epoch,
+                    batch,
+                    True,
+                )
 
         recon_test_loss /= len(self._test_dataloader)
         print(f"Mean test reconstruction loss: {recon_test_loss:>8f} \n")
@@ -325,17 +343,33 @@ class VqVaeTrainer:
         self,
         x: torch.Tensor,
         x_recon: torch.Tensor,
+        real_probs_real: torch.Tensor,
+        real_probs_fake: torch.Tensor,
         epoch: int,
         batch: int,
         validation: bool,
     ):
-        fig, ax = plt.subplots(nrows=2)
-        ax[0].imshow(VqVaeTrainer.image_tensor_to_array(x))
-        ax[0].axis("off")
-        ax[0].set_title("Input image")
-        ax[1].imshow(VqVaeTrainer.image_tensor_to_array(x_recon))
-        ax[1].axis("off")
-        ax[1].set_title("Reconstructed image")
+        fig, ax = plt.subplots(nrows=2, ncols=2)
+        ax[0, 0].imshow(VqVaeTrainer.image_tensor_to_array(x))
+        ax[0, 0].axis("off")
+        ax[0, 0].set_title("Input image")
+        ax[1, 0].imshow(VqVaeTrainer.image_tensor_to_array(x_recon))
+        ax[1, 0].axis("off")
+        ax[1, 0].set_title("Reconstructed image")
+
+        im1 = ax[0, 1].imshow(
+            np.clip(real_probs_real.cpu().detach().numpy(), 0, 1), vmin=0, vmax=1
+        )
+        ax[0, 1].axis("off")
+        cb1 = plt.colorbar(im1, ax=ax[0, 1])
+        cb1.set_label("Real probability")
+
+        im2 = ax[1, 1].imshow(
+            np.clip(real_probs_fake.cpu().detach().numpy(), 0, 1), vmin=0, vmax=1
+        )
+        ax[1, 1].axis("off")
+        cb2 = plt.colorbar(im2, ax=ax[1, 1])
+        cb2.set_label("Real probability")
 
         output_path = (
             self._output_path / "validation"

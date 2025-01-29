@@ -97,7 +97,7 @@ class VectorQuantizer(nn.Module):
         # Entropy of codebook selection distribution
         codebook_usage_counts = torch.bincount(encoding_indices.flatten())
         codebook_probabilities = codebook_usage_counts / codebook_usage_counts.sum()
-        entropy = torch.sum(
+        entropy = -torch.sum(
             codebook_probabilities * torch.log(codebook_probabilities + 1e-10)
         )
 

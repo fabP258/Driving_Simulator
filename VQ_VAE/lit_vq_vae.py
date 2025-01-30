@@ -11,7 +11,7 @@ from taming_model import Encoder, Decoder
 
 from vq_vae import VqVaeConfig
 from quantizer import VectorQuantizer
-from discriminator import Discriminator
+from discriminator import Discriminator, weights_init
 
 
 def normalize_image(x: torch.Tensor) -> torch.Tensor:
@@ -24,6 +24,13 @@ def adopt_weight(weight, global_step, threshold=0, value=0.0):
     if global_step < threshold:
         weight = value
     return weight
+
+
+def hinge_d_loss(logits_real: torch.Tensor, logits_fake: torch.Tensor):
+    loss_real = torch.mean(nn.functional.relu(1 - logits_real))
+    loss_fake = torch.mean(nn.functional.relu(1 + logits_fake))
+    d_loss = 0.5 * (loss_real + loss_fake)
+    return d_loss
 
 
 class LitVqVae(lightning.LightningModule):
@@ -48,7 +55,9 @@ class LitVqVae(lightning.LightningModule):
             padding=1,
         )
         self.decoder = Decoder(**config.encoder_decoder_args())
-        self.discriminator = Discriminator(in_channels=3, num_layers=2, num_hiddens=64)
+        self.discriminator = Discriminator(
+            in_channels=3, num_layers=4, num_hiddens=64
+        ).apply(weights_init)
         self.perceptual = LPIPS(net="vgg")
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.learning_rate = lr
@@ -57,7 +66,7 @@ class LitVqVae(lightning.LightningModule):
         self.codebook_weight = 0.25  # beta
         self.perceptual_weight = 0.1
         self.gan_weight = 1.0
-        self.gan_start_steps = 50000  # in batches/steps, each forward pass is 2 steps
+        self.gan_start_steps = 1000  # in batches/steps, each forward pass is 2 steps
 
     def encode(self, x):
         h = self.encoder(x)
@@ -94,7 +103,6 @@ class LitVqVae(lightning.LightningModule):
         self.toggle_optimizer(opt_ae)
 
         # Discriminator
-        disc_logits_real = self.discriminator(x)
         disc_logits_fake = self.discriminator(out["x_recon"])
 
         # L1 reconstruction loss
@@ -108,9 +116,7 @@ class LitVqVae(lightning.LightningModule):
         nll_loss = recon_loss + self.perceptual_weight * perceptual_loss
 
         # Generator BCE loss
-        generator_loss = self.bce_loss(
-            disc_logits_fake, torch.ones_like(disc_logits_fake)
-        )
+        generator_loss = -torch.mean(disc_logits_fake)
         generator_adaptive_weight = self.calculate_adaptive_weight(
             nll_loss, generator_loss
         )
@@ -139,19 +145,15 @@ class LitVqVae(lightning.LightningModule):
         # Discriminator
         self.toggle_optimizer(opt_disc)
 
-        disc_loss_real = self.bce_loss(
-            disc_logits_real, torch.ones_like(disc_logits_real)
-        )
+        # Note:
+        disc_logits_real = self.discriminator(x)
         disc_logits_fake = self.discriminator(out["x_recon"].detach())
-        disc_loss_fake = self.bce_loss(
-            disc_logits_fake, torch.zeros_like(disc_logits_fake)
-        )
         gan_weight = adopt_weight(
             self.gan_weight,
             self.global_step,
             threshold=self.gan_start_steps,
         )
-        disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
+        disc_loss = hinge_d_loss(disc_logits_real, disc_logits_fake)
         opt_disc.zero_grad()
         self.manual_backward(gan_weight * disc_loss)
         opt_disc.step()
@@ -171,9 +173,7 @@ class LitVqVae(lightning.LightningModule):
 
         # Generator loss
         disc_logits_fake = self.discriminator(out["x_recon"])
-        generator_loss = self.bce_loss(
-            disc_logits_fake, torch.ones_like(disc_logits_fake)
-        )
+        generator_loss = -torch.mean(disc_logits_fake)
 
         # L1 reconstruction loss
         recon_loss = torch.mean(torch.abs(x.contiguous() - out["x_recon"].contiguous()))
@@ -184,13 +184,7 @@ class LitVqVae(lightning.LightningModule):
         ).mean()
 
         disc_logits_real = self.discriminator(x)
-        disc_loss_real = self.bce_loss(
-            disc_logits_real, torch.ones_like(disc_logits_real)
-        )
-        disc_loss_fake = self.bce_loss(
-            disc_logits_fake, torch.zeros_like(disc_logits_fake)
-        )
-        disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
+        disc_loss = hinge_d_loss(disc_logits_real, disc_logits_fake)
 
         if batch_idx % 1000 == 0:
             self.logger.experiment.add_image(

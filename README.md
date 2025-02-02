@@ -49,6 +49,7 @@ Now you should be able to open the *TensorBoard* dashboard in the browser at `ht
 * LPIPS perceptual loss [3]
 * $K$-means initialization on first mini-batch
 * $l_2$-normalization / cosine-similarity in distance calculation
+* Entropy calculation for codebook utilization monitoring during training
 
 ## Performance baseline
 

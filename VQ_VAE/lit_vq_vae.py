@@ -37,6 +37,7 @@ class LitVqVae(lightning.LightningModule):
 
     def __init__(self, config: VqVaeConfig, lr: float = 1e-4):
         super().__init__()
+        self.save_hyperparameters()
 
         # disable automatic optimization since we have multiple optimizers
         self.automatic_optimization = False
@@ -61,12 +62,13 @@ class LitVqVae(lightning.LightningModule):
         self.perceptual = LPIPS(net="vgg")
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.learning_rate = lr
+        self.cosine_decay_steps = 15000
 
         # loss weights
-        self.codebook_weight = 0.25  # beta
+        self.codebook_weight = 1.0  # beta
         self.perceptual_weight = 0.1
         self.gan_weight = 1.0
-        self.gan_start_steps = 1000  # in batches/steps, each forward pass is 2 steps
+        self.gan_start_steps = 100000  # in batches/steps
 
     def encode(self, x):
         h = self.encoder(x)
@@ -122,7 +124,7 @@ class LitVqVae(lightning.LightningModule):
         )
         gan_weight = adopt_weight(
             self.gan_weight,
-            self.global_step,
+            self.global_step / 2,
             threshold=self.gan_start_steps,
         )
         gan_weight *= generator_adaptive_weight
@@ -145,12 +147,11 @@ class LitVqVae(lightning.LightningModule):
         # Discriminator
         self.toggle_optimizer(opt_disc)
 
-        # Note:
         disc_logits_real = self.discriminator(x)
         disc_logits_fake = self.discriminator(out["x_recon"].detach())
         gan_weight = adopt_weight(
-            self.gan_weight,
-            self.global_step,
+            1.0,
+            self.global_step / 2,
             threshold=self.gan_start_steps,
         )
         disc_loss = hinge_d_loss(disc_logits_real, disc_logits_fake)
@@ -159,6 +160,12 @@ class LitVqVae(lightning.LightningModule):
         opt_disc.step()
         self.untoggle_optimizer(opt_disc)
 
+        # update lr schedulers
+        lr_sched_ae, lr_sched_disc = self.lr_schedulers()
+        if (self.global_step / 2) < self.cosine_decay_steps:
+            lr_sched_ae.step()
+            lr_sched_disc.step()
+
         self.log("train_l1_recon_loss", recon_loss, prog_bar=True)
         self.log("train_perceptual_loss", perceptual_loss)
         self.log("train_generator_loss", generator_loss)
@@ -166,6 +173,8 @@ class LitVqVae(lightning.LightningModule):
         self.log("train_commitment_loss", out["commitment_loss"])
         self.log("train_discriminator_loss", disc_loss)
         self.log("train_codebook_entropy", out["entropy"])
+        self.log("vae_lr", lr_sched_ae.get_lr()[0])
+        self.log("disc_lr", lr_sched_disc.get_lr()[0])
 
     def validation_step(self, batch, batch_idx):
         x = batch
@@ -213,13 +222,19 @@ class LitVqVae(lightning.LightningModule):
             lr=lr,
             betas=(0.5, 0.9),
         )
+        lr_sched_ae = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt_ae, T_max=self.cosine_decay_steps, eta_min=1e-5
+        )
 
         # Discriminator
         opt_disc = torch.optim.Adam(
             self.discriminator.parameters(), lr=lr, betas=(0.5, 0.9)
         )
+        lr_sched_disc = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt_disc, T_max=self.cosine_decay_steps, eta_min=1e-5
+        )
 
-        return [opt_ae, opt_disc], []
+        return [opt_ae, opt_disc], [lr_sched_ae, lr_sched_disc]
 
     def get_last_decoder_layer(self):
         return self.decoder.conv_out.weight

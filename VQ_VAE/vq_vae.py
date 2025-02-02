@@ -24,7 +24,7 @@ class VqVaeConfig:
     ch: int = 128
     dropout: float = 0.0
     double_z: bool = True
-    embedding_dim: int = 128
+    embedding_dim: int = 256
     use_l2_normalization: bool = True
     use_ema: bool = True
     ema_decay: float = 0.99

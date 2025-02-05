@@ -1,6 +1,8 @@
 import lightning
 
 import torch
+import numpy as np
+from PIL import Image
 from torch import nn
 from torchvision.utils import make_grid
 
@@ -12,11 +14,7 @@ from taming_model import Encoder, Decoder
 from vq_vae import VqVaeConfig
 from quantizer import VectorQuantizer
 from discriminator import Discriminator, weights_init
-
-
-def normalize_image(x: torch.Tensor) -> torch.Tensor:
-    """Normalizes image from range [0, 1] to [-1,1]"""
-    return x * 2 - 1
+from dataset import denormalize_image
 
 
 def adopt_weight(weight, global_step, threshold=0, value=0.0):
@@ -26,16 +24,15 @@ def adopt_weight(weight, global_step, threshold=0, value=0.0):
     return weight
 
 
-def hinge_d_loss(logits_real: torch.Tensor, logits_fake: torch.Tensor):
-    loss_real = torch.mean(nn.functional.relu(1 - logits_real))
-    loss_fake = torch.mean(nn.functional.relu(1 + logits_fake))
-    d_loss = 0.5 * (loss_real + loss_fake)
-    return d_loss
-
-
 class LitVqVae(lightning.LightningModule):
 
-    def __init__(self, config: VqVaeConfig, lr: float = 1e-4):
+    def __init__(
+        self,
+        config: VqVaeConfig,
+        lr: float = 1e-4,
+        cosine_decay_steps: int = 50000,
+        gan_start_steps: int = 5000,
+    ):
         super().__init__()
         self.save_hyperparameters()
 
@@ -62,13 +59,13 @@ class LitVqVae(lightning.LightningModule):
         self.perceptual = LPIPS(net="vgg")
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.learning_rate = lr
-        self.cosine_decay_steps = 15000
+        self.cosine_decay_steps = cosine_decay_steps
 
         # loss weights
         self.codebook_weight = 1.0  # beta
         self.perceptual_weight = 0.1
         self.gan_weight = 1.0
-        self.gan_start_steps = 100000  # in batches/steps
+        self.gan_start_steps = gan_start_steps  # in batches/steps
 
     def encode(self, x):
         h = self.encoder(x)
@@ -99,6 +96,14 @@ class LitVqVae(lightning.LightningModule):
 
         x = batch
         out = self(x)
+
+        if self.global_step % 1000 == 0:
+            self.logger.experiment.add_image(
+                f"train_reconstructions_step{self.global_step}",
+                make_grid(denormalize_image(out["x_recon"])),
+                batch_idx,
+            )
+
         opt_ae, opt_disc = self.optimizers()
 
         # VQ-VAE
@@ -112,13 +117,13 @@ class LitVqVae(lightning.LightningModule):
 
         # LPIPS perceptual loss
         self.perceptual.eval()
-        perceptual_loss = torch.squeeze(
-            self.perceptual(normalize_image(x), normalize_image(out["x_recon"]))
-        ).mean()
+        perceptual_loss = torch.squeeze(self.perceptual(x, out["x_recon"])).mean()
         nll_loss = recon_loss + self.perceptual_weight * perceptual_loss
 
         # Generator BCE loss
-        generator_loss = -torch.mean(disc_logits_fake)
+        generator_loss = self.bce_loss(
+            disc_logits_fake, torch.ones_like(disc_logits_fake)
+        )
         generator_adaptive_weight = self.calculate_adaptive_weight(
             nll_loss, generator_loss
         )
@@ -149,20 +154,25 @@ class LitVqVae(lightning.LightningModule):
 
         disc_logits_real = self.discriminator(x)
         disc_logits_fake = self.discriminator(out["x_recon"].detach())
-        gan_weight = adopt_weight(
-            1.0,
-            self.global_step / 2,
-            threshold=self.gan_start_steps,
+        disc_loss_real = self.bce_loss(
+            disc_logits_real, torch.ones_like(disc_logits_real)
         )
-        disc_loss = hinge_d_loss(disc_logits_real, disc_logits_fake)
+        disc_loss_fake = self.bce_loss(
+            disc_logits_fake, torch.zeros_like(disc_logits_fake)
+        )
+        disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
         opt_disc.zero_grad()
-        self.manual_backward(gan_weight * disc_loss)
+        self.manual_backward(disc_loss)
         opt_disc.step()
         self.untoggle_optimizer(opt_disc)
 
         # update lr schedulers
         lr_sched_ae, lr_sched_disc = self.lr_schedulers()
-        if (self.global_step / 2) < self.cosine_decay_steps:
+        if (
+            self.gan_start_steps
+            < (self.global_step / 2)
+            < (self.gan_start_steps + self.cosine_decay_steps)
+        ):
             lr_sched_ae.step()
             lr_sched_disc.step()
 
@@ -172,6 +182,8 @@ class LitVqVae(lightning.LightningModule):
         self.log("train_generator_adaptive_weight", generator_adaptive_weight)
         self.log("train_commitment_loss", out["commitment_loss"])
         self.log("train_discriminator_loss", disc_loss)
+        self.log("train_discriminator_real_loss", disc_loss_real)
+        self.log("train_discriminator_fake_loss", disc_loss_fake)
         self.log("train_codebook_entropy", out["entropy"])
         self.log("vae_lr", lr_sched_ae.get_lr()[0])
         self.log("disc_lr", lr_sched_disc.get_lr()[0])
@@ -182,23 +194,29 @@ class LitVqVae(lightning.LightningModule):
 
         # Generator loss
         disc_logits_fake = self.discriminator(out["x_recon"])
-        generator_loss = -torch.mean(disc_logits_fake)
+        generator_loss = self.bce_loss(
+            disc_logits_fake, torch.ones_like(disc_logits_fake)
+        )
 
         # L1 reconstruction loss
         recon_loss = torch.mean(torch.abs(x.contiguous() - out["x_recon"].contiguous()))
 
         # LPIPS perceptual loss
-        perceptual_loss = torch.squeeze(
-            self.perceptual(normalize_image(x), normalize_image(out["x_recon"]))
-        ).mean()
+        perceptual_loss = torch.squeeze(self.perceptual(x, out["x_recon"])).mean()
 
         disc_logits_real = self.discriminator(x)
-        disc_loss = hinge_d_loss(disc_logits_real, disc_logits_fake)
+        disc_loss_real = self.bce_loss(
+            disc_logits_real, torch.ones_like(disc_logits_real)
+        )
+        disc_loss_fake = self.bce_loss(
+            disc_logits_fake, torch.zeros_like(disc_logits_fake)
+        )
+        disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
 
         if batch_idx % 1000 == 0:
             self.logger.experiment.add_image(
                 f"reconstructions_ep{self.global_step}",
-                make_grid(out["x_recon"]),
+                make_grid(denormalize_image(out["x_recon"])),
                 batch_idx,
             )
 
@@ -207,6 +225,8 @@ class LitVqVae(lightning.LightningModule):
         self.log("test_generator_loss", generator_loss)
         self.log("test_commitment_loss", out["commitment_loss"])
         self.log("test_discriminator_loss", disc_loss)
+        self.log("train_discriminator_real_loss", disc_loss_real)
+        self.log("train_discriminator_fake_loss", disc_loss_fake)
         self.log("test_codebook_entropy", out["entropy"])
 
     def configure_optimizers(self):

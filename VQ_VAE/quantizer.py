@@ -45,7 +45,9 @@ class VectorQuantizer(nn.Module):
             self.register_buffer("embedding_table", embedding_table)
         else:
             # Wille be updated by the optimizer and therefore needs to be returned by self.parameters()
-            self.register_parameter("embedding_table", embedding_table)
+            self.register_parameter(
+                "embedding_table", nn.Parameter(embedding_table, requires_grad=True)
+            )
 
         self.cluster_count_ma = ExponentialMovingAverage(ema_decay, (num_embeddings,))
         self.embedding_sums = ExponentialMovingAverage(ema_decay, embedding_table.shape)

@@ -40,31 +40,34 @@ def get_segment_folders():
     return segment_folders
 
 
-# Setup logger
-log_path = Path(__file__).parent / "logs"
-log_path.mkdir(exist_ok=True, parents=True)
-logger = TensorBoardLogger(log_path, name="vq_gan_logs")
+if __name__ == "__main__":
 
-vq_vae = LitVqVae(VqVaeConfig())
-segment_folders = get_segment_folders()
-segment_folders_train, segment_folders_test = split_list(
-    segment_folders[:20], shuffle=True, ratio=0.8
-)
-train_dataloader = DataLoader(
-    DrivingDataset(segment_folders_train),
-    batch_size=4,
-    shuffle=True,
-    num_workers=20,
-)
-val_dataloader = DataLoader(
-    DrivingDataset(segment_folders_test),
-    batch_size=4,
-    shuffle=False,
-    num_workers=20,
-)
-trainer = lightning.Trainer(
-    accelerator="gpu", fast_dev_run=False, max_steps=400000, logger=logger
-)
-trainer.fit(
-    model=vq_vae, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader
-)
+    # Setup logger
+    log_path = Path(__file__).parent / "logs"
+    log_path.mkdir(exist_ok=True, parents=True)
+    logger = TensorBoardLogger(log_path, name="vq_gan_logs")
+
+    vq_vae = LitVqVae(VqVaeConfig())
+    segment_folders = get_segment_folders()
+    segment_folders_train, segment_folders_test = split_list(
+        segment_folders[:40], shuffle=True, ratio=0.8
+    )
+    train_dataloader = DataLoader(
+        DrivingDataset(segment_folders_train),
+        batch_size=4,
+        shuffle=True,
+        num_workers=1,
+    )
+    print(f"Training dataset contains {len(train_dataloader.dataset)} images.")
+    val_dataloader = DataLoader(
+        DrivingDataset(segment_folders_test),
+        batch_size=4,
+        shuffle=False,
+        num_workers=20,
+    )
+    trainer = lightning.Trainer(
+        accelerator="gpu", fast_dev_run=False, max_steps=400000, logger=logger
+    )
+    trainer.fit(
+        model=vq_vae, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader
+    )

@@ -1,9 +1,20 @@
 import os
+import torch
 from typing import List
 from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+
+
+def normalize_image(x: torch.Tensor) -> torch.Tensor:
+    """Normalizes image from range [0, 1] to [-1,1]"""
+    return x * 2.0 - 1.0
+
+
+def denormalize_image(x: torch.Tensor) -> torch.Tensor:
+    """Denormalizes image from range [-1, 1] to [0,1]"""
+    return (x + 1.0) / 2.0
 
 
 class DrivingDataset(Dataset):
@@ -59,4 +70,5 @@ class DrivingDataset(Dataset):
             self.segment_path_list[segment_index] / f"images/{frame_index:04}.png"
         )
         image_tensor = self.transforms(self.read_image(image_path))
+        image_tensor = normalize_image(image_tensor)
         return image_tensor

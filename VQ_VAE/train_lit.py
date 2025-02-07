@@ -2,13 +2,10 @@ import os
 import random
 from pathlib import Path
 
-from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 
 from trainer import VqVaeTrainer
 from dataset import DrivingDataset
-from lit_vq_vae import LitVqVae
-from vq_vae import VqVaeConfig
 
 
 def split_list(list_to_split: list, shuffle: bool = False, ratio: float = 0.5):
@@ -43,11 +40,12 @@ def get_segment_folders():
 if __name__ == "__main__":
 
     # Setup logger
-    log_path = Path(__file__).parent / "logsv2"
+    log_path = Path(__file__).parent.parent / "runs"
     log_path.mkdir(exist_ok=True, parents=True)
-    writer = SummaryWriter()
 
-    vq_vae = LitVqVae(VqVaeConfig())
+    checkpoint_path = None
+    # checkpoint_path = log_path / "checkpoint_step90.pth"
+
     segment_folders = get_segment_folders()
     segment_folders_train, segment_folders_test = split_list(
         segment_folders, shuffle=True, ratio=0.8
@@ -65,5 +63,8 @@ if __name__ == "__main__":
         shuffle=False,
         num_workers=20,
     )
-    trainer = VqVaeTrainer(train_dataloader)
-    trainer.train()
+    if checkpoint_path is not None:
+        trainer = VqVaeTrainer.from_checkpoint(checkpoint_path)
+    else:
+        trainer = VqVaeTrainer(log_path)
+    trainer.train(train_dataloader)

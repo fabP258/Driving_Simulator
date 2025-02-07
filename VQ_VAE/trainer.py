@@ -1,6 +1,13 @@
 from abc import ABC, abstractmethod
+from pathlib import Path
+from dataclasses import asdict
 from typing import Union
 from tqdm import tqdm
+
+from PIL import ImageFile
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 
 import torch
 from torch import nn
@@ -23,28 +30,33 @@ def adopt_weight(weight, global_step, threshold=0, value=0.0):
 
 
 class Trainer(ABC):
+
     def __init__(
         self,
-        train_dataloader: DataLoader,
-        logger: SummaryWriter,
-        validation_dataloader: Union[None, DataLoader] = None,
+        log_dir: Union[str, Path],
+        device: str,
         max_epochs: int = 100,
         max_steps: int = 1000000,
     ):
-        self.train_dataloader = train_dataloader
-        self.logger = logger
-        self.validation_dataloader = validation_dataloader
+        self.log_dir = Path(log_dir)
+        self.logger = SummaryWriter(log_dir=self.log_dir)
         self.max_epochs = max_epochs
         self.max_steps = max_steps
         self.epoch = 0
         self.global_step = 0
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = (
+            "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
+        )
         self.to_device()
 
-    def train(self):
+    def train(
+        self,
+        train_dataloader: DataLoader,
+        validation_dataloader: Union[None, DataLoader] = None,
+    ):
         while self.epoch < self.max_epochs:
             self.set_train_mode()
-            for data in tqdm(self.train_dataloader, desc=f"Train Epoch {self.epoch}"):
+            for data in tqdm(train_dataloader, desc=f"Train Epoch {self.epoch}"):
                 # to device
                 if isinstance(data, tuple):
                     for sub_data in data:
@@ -53,6 +65,11 @@ class Trainer(ABC):
                 elif isinstance(data, torch.Tensor):
                     data = data.to(self.device)
                 self.training_step(data)
+                if self.global_step % 1000 == 0:
+                    self.save_checkpoint(
+                        self.log_dir / f"checkpoint_step{self.global_step}.pth"
+                    )
+
                 self.global_step += 1
                 self.logger.flush()
 
@@ -86,23 +103,35 @@ class Trainer(ABC):
     def configure_optimizers(self, *args, **kwargs):
         raise NotImplementedError
 
+    @abstractmethod
+    def save_checkpoint(self, checkpoint_path: str):
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def from_checkpoint(cls, checkpoint_path: str):
+        raise NotImplementedError
+
 
 class VqVaeTrainer(Trainer):
 
     def __init__(
         self,
-        train_dataloader: DataLoader,
-        validation_dataloader: Union[None, DataLoader] = None,
+        log_dir: str,
         vae_config: VqVaeConfig = VqVaeConfig(),
-        logger: SummaryWriter = SummaryWriter(),
         perceptual_loss_weight: float = 0.1,
         gan_weight: float = 1.0,
         gan_start_steps: int = 50000,
         commitment_loss_weight: float = 1.0,
+        l1_loss_weight: float = 0.1,
+        l2_loss_weight: float = 2.0,
         initial_lr: float = 2.5e-6,
         final_lr: float = 2.5e-7,
+        weight_decay: float = 0.01,
         cosine_decay_steps: int = 50000,
+        device: str = "cuda",
     ):
+        self.vae_config = vae_config
         # nn.Modules used for training
         self.encoder = Encoder(**vae_config.encoder_decoder_args())
         self.pre_quant_conv = nn.Conv2d(
@@ -131,10 +160,13 @@ class VqVaeTrainer(Trainer):
         self.gan_weight = gan_weight
         self.gan_start_steps = gan_start_steps
         self.commitment_loss_weight = commitment_loss_weight
+        self.l1_loss_weight = l1_loss_weight
+        self.l2_loss_weight = l2_loss_weight
+        self.cosine_decay_steps = cosine_decay_steps
         self.optimizers, self.lr_schedulers = self.configure_optimizers(
-            initial_lr, final_lr, cosine_decay_steps
+            initial_lr, final_lr, cosine_decay_steps, weight_decay
         )
-        super().__init__(train_dataloader, logger, validation_dataloader)
+        super().__init__(log_dir, device)
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
 
@@ -153,8 +185,12 @@ class VqVaeTrainer(Trainer):
         raise NotImplementedError
 
     @staticmethod
-    def reconstruction_loss(x: torch.Tensor, x_recon: torch.Tensor):
+    def l1_reconstruction_loss(x: torch.Tensor, x_recon: torch.Tensor):
         return torch.mean(torch.abs(x - x_recon))
+
+    @staticmethod
+    def l2_reconstruction_loss(x: torch.Tensor, x_recon: torch.tensor):
+        return torch.mean((x - x_recon) ** 2)
 
     def discriminator_loss(
         self, x: torch.Tensor, x_recon: torch.Tensor, log_output: bool
@@ -189,7 +225,12 @@ class VqVaeTrainer(Trainer):
         x_recon = self.decode(z)
 
         # L1 reconstruction loss
-        reconstruction_loss = self.reconstruction_loss(x, x_recon)
+        l1_reconstruction_loss = self.l1_reconstruction_loss(x, x_recon)
+        l2_reconsruction_loss = self.l2_reconstruction_loss(x, x_recon)
+        reconstruction_loss = (
+            self.l1_loss_weight * l1_reconstruction_loss
+            + self.l2_loss_weight * l2_reconsruction_loss
+        )
 
         # Perceptual loss
         self.perceptual.eval()
@@ -237,7 +278,10 @@ class VqVaeTrainer(Trainer):
 
         # log
         self.logger.add_scalar(
-            "train_l1_reconstruction_loss", reconstruction_loss, self.global_step
+            "train_l1_reconstruction_loss", l1_reconstruction_loss, self.global_step
+        )
+        self.logger.add_scalar(
+            "train_l2_reconstruction_loss", l2_reconsruction_loss, self.global_step
         )
         self.logger.add_scalar(
             "train_perceptual_loss", perceptual_loss, self.global_step
@@ -303,7 +347,11 @@ class VqVaeTrainer(Trainer):
         )
 
     def configure_optimizers(
-        self, initial_lr: float, final_lr: float, cosine_decay_steps: int
+        self,
+        initial_lr: float,
+        final_lr: float,
+        cosine_decay_steps: int,
+        weight_decay: float,
     ):
         # Autoencoder
         opt_ae = torch.optim.Adam(
@@ -314,6 +362,7 @@ class VqVaeTrainer(Trainer):
             + list(self.post_quant_conv.parameters()),
             lr=initial_lr,
             betas=(0.5, 0.9),
+            weight_decay=weight_decay,
         )
         lr_sched_ae = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt_ae, T_max=cosine_decay_steps, eta_min=final_lr
@@ -321,7 +370,10 @@ class VqVaeTrainer(Trainer):
 
         # Discriminator
         opt_disc = torch.optim.Adam(
-            self.discriminator.parameters(), lr=initial_lr, betas=(0.5, 0.9)
+            self.discriminator.parameters(),
+            lr=initial_lr,
+            betas=(0.5, 0.9),
+            weight_decay=weight_decay,
         )
         lr_sched_disc = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt_disc, T_max=cosine_decay_steps, eta_min=final_lr
@@ -330,6 +382,82 @@ class VqVaeTrainer(Trainer):
             "autoencoder": lr_sched_ae,
             "discriminator": lr_sched_disc,
         }
+
+    def save_checkpoint(self, checkpoint_path: str):
+        checkpoint = {}
+        # save model state dicts
+        for member_name in vars(self):
+            attr = getattr(self, member_name)
+            if isinstance(attr, nn.Module):
+                checkpoint.update({member_name: attr.state_dict()})
+
+        # save optimizer states
+        checkpoint.update(
+            {
+                "optimizer_states": {
+                    "autoencoder": self.optimizers["autoencoder"].state_dict(),
+                    "discriminator": self.optimizers["discriminator"].state_dict(),
+                }
+            }
+        )
+
+        # save lr scheduler states
+        checkpoint.update(
+            {
+                "scheduler_states": {
+                    "autoencoder": self.lr_schedulers["autoencoder"].state_dict(),
+                    "discriminator": self.lr_schedulers["discriminator"].state_dict(),
+                }
+            }
+        )
+
+        # save c'tor args
+        checkpoint.update(
+            {
+                "ctor_args": {
+                    "vae_config": asdict(self.vae_config),
+                    "perceptual_loss_weight": self.perceptual_loss_weight,
+                    "gan_weight": self.gan_weight,
+                    "gan_start_steps": self.gan_start_steps,
+                    "commitment_loss_weight": self.commitment_loss_weight,
+                    "cosine_decay_steps": self.cosine_decay_steps,
+                    "l1_loss_weight": self.l1_loss_weight,
+                    "l2_loss_weight": self.l2_loss_weight,
+                }
+            }
+        )
+
+        # save class state
+        checkpoint.update(
+            {"class_state": {"global_step": self.global_step, "epoch": self.epoch}}
+        )
+
+        torch.save(checkpoint, checkpoint_path)
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint_path: str, device: str = "cuda"):
+        checkpoint = torch.load(checkpoint_path)
+        ctor_args = checkpoint["ctor_args"]
+        ctor_args["vae_config"] = VqVaeConfig(**ctor_args["vae_config"])
+        trainer = cls(log_dir=Path(checkpoint_path).parent, **ctor_args, device=device)
+
+        for member_name in vars(trainer):
+            attr = getattr(trainer, member_name)
+            if isinstance(attr, nn.Module):
+                attr.load_state_dict(checkpoint[member_name])
+
+        for opt_type in ["autoencoder", "discriminator"]:
+            trainer.optimizers[opt_type].load_state_dict(
+                checkpoint["optimizer_states"][opt_type]
+            )
+            trainer.lr_schedulers[opt_type].load_state_dict(
+                checkpoint["scheduler_states"][opt_type]
+            )
+
+        trainer.global_step = checkpoint["class_state"]["global_step"]
+        trainer.epoch = checkpoint["class_state"]["epoch"]
+
+        return trainer
 
     def get_last_decoder_layer(self):
         return self.decoder.conv_out.weight

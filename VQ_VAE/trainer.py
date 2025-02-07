@@ -1,402 +1,344 @@
-import random
-from typing import List
-from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
+from abc import ABC, abstractmethod
+from typing import Union
+from tqdm import tqdm
 
 import torch
+from torch import nn
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import make_grid
 from lpips import LPIPS
 
-from dataset import DrivingDataset
-from vq_vae import VqVae, VqVaeConfig
-from discriminator import Discriminator
+from taming_model import Encoder, Decoder, VqVaeConfig
+from quantizer import VectorQuantizer
+from discriminator import Discriminator, weights_init
+from dataset import denormalize_image
 
 
-def normalize_image(x: torch.Tensor) -> torch.Tensor:
-    """Normalizes image from range [0, 1] to [-1,1]"""
-    return x * 2 - 1
+def adopt_weight(weight, global_step, threshold=0, value=0.0):
+    """Implements a horizontally shifted ReLU."""
+    if global_step < threshold:
+        weight = value
+    return weight
 
 
-class VqVaeTrainer:
+class Trainer(ABC):
+    def __init__(
+        self,
+        train_dataloader: DataLoader,
+        logger: SummaryWriter,
+        validation_dataloader: Union[None, DataLoader] = None,
+        max_epochs: int = 100,
+        max_steps: int = 1000000,
+    ):
+        self.train_dataloader = train_dataloader
+        self.logger = logger
+        self.validation_dataloader = validation_dataloader
+        self.max_epochs = max_epochs
+        self.max_steps = max_steps
+        self.epoch = 0
+        self.global_step = 0
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.to_device()
+
+    def train(self):
+        while self.epoch < self.max_epochs:
+            self.set_train_mode()
+            for data in tqdm(self.train_dataloader, desc=f"Train Epoch {self.epoch}"):
+                # to device
+                if isinstance(data, tuple):
+                    for sub_data in data:
+                        if isinstance(sub_data, torch.Tensor):
+                            sub_data = sub_data.to(self.device)
+                elif isinstance(data, torch.Tensor):
+                    data = data.to(self.device)
+                self.training_step(data)
+                self.global_step += 1
+                self.logger.flush()
+
+            # TODO: Iterate over validation dataloader every x (epochs, batches)?
+
+            self.epoch += 1
+
+    def to_device(self):
+        for member in vars(self):
+            attr = getattr(self, member)
+            if isinstance(attr, nn.Module):
+                attr.to(self.device)
+
+    def set_train_mode(self):
+        for member in vars(self):
+            attr = getattr(self, member)
+            if isinstance(attr, nn.Module):
+                attr.train()
+
+    def set_eval_mode(self):
+        for member in vars(self):
+            attr = getattr(self, member)
+            if isinstance(attr, nn.Module):
+                attr.eval()
+
+    @abstractmethod
+    def training_step(self, *args, **kwargs):
+        raise NotImplementedError
+
+    @abstractmethod
+    def configure_optimizers(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+class VqVaeTrainer(Trainer):
 
     def __init__(
         self,
-        segment_folders: List[Path],
-        output_path: Path,
-        train_test_ratio: float = 0.8,
-        batch_size: int = 10,
-        num_workers: int = 18,
-        learning_rate: float = 1e-4,
-        weight_decay: float = 1e-8,
-        loss_beta: float = 0.25,
-        l1_loss_weight: float = 0.2,
-        vq_vae_config: VqVaeConfig = VqVaeConfig(),
+        train_dataloader: DataLoader,
+        validation_dataloader: Union[None, DataLoader] = None,
+        vae_config: VqVaeConfig = VqVaeConfig(),
+        logger: SummaryWriter = SummaryWriter(),
+        perceptual_loss_weight: float = 0.1,
+        gan_weight: float = 1.0,
+        gan_start_steps: int = 50000,
+        commitment_loss_weight: float = 1.0,
+        initial_lr: float = 2.5e-6,
+        final_lr: float = 2.5e-7,
+        cosine_decay_steps: int = 50000,
     ):
-
-        # split the segment folders into test and training data
-        self._segment_folders_train, self._segment_folders_test = (
-            VqVaeTrainer.split_list(
-                segment_folders, shuffle=True, ratio=train_test_ratio
-            )
+        # nn.Modules used for training
+        self.encoder = Encoder(**vae_config.encoder_decoder_args())
+        self.pre_quant_conv = nn.Conv2d(
+            in_channels=(
+                2 * vae_config.z_channels
+                if vae_config.double_z
+                else vae_config.z_channels
+            ),
+            out_channels=vae_config.embedding_dim,
+            kernel_size=1,
         )
-
-        self._train_dataloader = DataLoader(
-            DrivingDataset(self._segment_folders_train),
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
+        self.quantizer = VectorQuantizer(**vae_config.quantizer_args())
+        self.post_quant_conv = nn.Conv2d(
+            in_channels=vae_config.embedding_dim,
+            out_channels=vae_config.z_channels,
+            kernel_size=3,
+            padding=1,
         )
-
-        self._test_dataloader = DataLoader(
-            DrivingDataset(self._segment_folders_test),
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
+        self.decoder = Decoder(**vae_config.encoder_decoder_args())
+        self.discriminator = Discriminator(
+            in_channels=3, num_layers=2, num_hiddens=64
+        ).apply(weights_init)
+        self.perceptual = LPIPS(net="vgg")
+        self.perceptual_loss_weight = perceptual_loss_weight
+        self.bce_loss = nn.BCEWithLogitsLoss()
+        self.gan_weight = gan_weight
+        self.gan_start_steps = gan_start_steps
+        self.commitment_loss_weight = commitment_loss_weight
+        self.optimizers, self.lr_schedulers = self.configure_optimizers(
+            initial_lr, final_lr, cosine_decay_steps
         )
+        super().__init__(train_dataloader, logger, validation_dataloader)
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
 
-        self._output_path = Path(output_path)
+    def encode(self, x: torch.Tensor):
+        h = self.encoder(x)
+        h = self.pre_quant_conv(h)
+        quant, dict_loss, commitment_loss, entropy, enc_indices = self.quantizer(h)
+        return quant, dict_loss, commitment_loss, entropy, enc_indices
 
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+    def decode(self, x):
+        h = self.post_quant_conv(x)
+        x_recon = self.decoder(h)
+        return x_recon
 
-        self._vq_vae = VqVae(config=vq_vae_config)
-        VqVaeTrainer.print_num_parameters("VQ-VAE", self._vq_vae)
-        self._vq_vae.to(self._device)
-
-        self._vae_optimizer = torch.optim.AdamW(
-            self._vq_vae.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-            betas=(0.5, 0.9),
-        )
-        self._vae_lr_scheduler = torch.optim.lr_scheduler.StepLR(
-            self._vae_optimizer, step_size=5, gamma=0.1
-        )
-
-        self._discriminator = Discriminator(
-            in_channels=3, num_layers=4, num_hiddens=128
-        )
-        VqVaeTrainer.print_num_parameters("Discriminator", self._discriminator)
-        self._discriminator.to(self._device)
-
-        self._disc_optimizer = torch.optim.AdamW(
-            self._discriminator.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-            betas=(0.5, 0.9),
-        )
-        self._disc_lr_scheduler = torch.optim.lr_scheduler.StepLR(
-            self._disc_optimizer, step_size=5, gamma=0.1
-        )
-
-        self._l2_loss_fn = torch.nn.MSELoss()
-        self._l1_loss_fn = torch.nn.L1Loss()
-        self._perceptual_loss = LPIPS(net="vgg").eval().to(self._device)
-        self._gan_loss_fn = torch.nn.BCEWithLogitsLoss()
-        self._loss_beta = loss_beta
-        self._l1_loss_weight = l1_loss_weight
-        self._l2_loss_weight = 2.0
-        self._perceptual_loss_weight = 0.1
-        self._gan_loss_weight = 1.0
-
-        self.initialize_loss_containers()
-
-    def initialize_loss_containers(self):
-        self._train_loss = {
-            "l1_loss": [],
-            "l2_loss": [],
-            "perceptual_loss": [],
-            "commitment_loss": [],
-            "gan_loss": {"discriminator": [], "generator": []},
-        }
-        self._test_loss = {"reconstruction_loss": []}
-        self._embedding_entropy = []
+    def decode_code(self, code):
+        raise NotImplementedError
 
     @staticmethod
-    def print_num_parameters(name: str, model: torch.nn.Module):
-        """Print the name and the number of paramaters for a given model."""
-        print(
-            f"{name} parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
+    def reconstruction_loss(x: torch.Tensor, x_recon: torch.Tensor):
+        return torch.mean(torch.abs(x - x_recon))
+
+    def discriminator_loss(
+        self, x: torch.Tensor, x_recon: torch.Tensor, log_output: bool
+    ):
+        disc_logits_real = self.discriminator(x)
+        disc_loss_real = self.bce_loss(
+            disc_logits_real, torch.ones_like(disc_logits_real)
         )
-
-    def train(self, epochs: int):
-
-        self.initialize_loss_containers()
-
-        for epoch in range(epochs):
-            print(f"Epoch {epoch+1}\n-------------------------------")
-            l1_loss, l2_loss, perceptual_loss, commitment_loss, gan_loss = (
-                self.train_single_epoch(epoch)
-            )
-            self._train_loss["commitment_loss"].append(commitment_loss)
-            self._train_loss["l1_loss"].append(l1_loss)
-            self._train_loss["l2_loss"].append(l2_loss)
-            self._train_loss["perceptual_loss"].append(perceptual_loss)
-            self._train_loss["gan_loss"]["discriminator"].append(
-                gan_loss["discriminator"]
-            )
-            self._train_loss["gan_loss"]["generator"].append(gan_loss["generator"])
-
-            self._vae_lr_scheduler.step()
-            self._test_loss["reconstruction_loss"].append(
-                self.calculate_test_loss(epoch)
-            )
-            self._embedding_entropy.append(self._vq_vae.codebook_selection_entropy())
-            self.generate_loss_plot(suffix=f"ep{epoch}")
-            self.plot_codebook_usage(suffix=f"ep{epoch}")
-            self._vq_vae.reset_codebook_usage_counts()
-            self._vq_vae.save_checkpoint(self._output_path, epoch)
-
-    def train_single_epoch(self, epoch: int):
-        self._vq_vae.train()
-        self._discriminator.train()
-
-        commitment_epoch_loss = 0
-        l1_epoch_loss = 0
-        l2_epoch_loss = 0
-        perceptual_epoch_loss = 0
-        gan_epoch_loss = {"discriminator": 0, "generator": 0}
-
-        for batch, x in enumerate(self._train_dataloader):
-            x = x.to(self._device)
-
-            # forward pass (VAE + Discriminator)
-            out = self._vq_vae(x)
-            disc_logits_real = self._discriminator(x)
-            disc_logits_fake = self._discriminator(out["x_recon"])
-
-            # sum up loss
-            l1_loss = self._l1_loss_fn(out["x_recon"], x)
-            l2_loss = self._l2_loss_fn(out["x_recon"], x)
-            perceptual_loss = torch.squeeze(
-                self._perceptual_loss(
-                    normalize_image(out["x_recon"]), normalize_image(x)
-                )
-            ).mean()
-            recon_loss = (
-                self._l1_loss_weight * l1_loss
-                + self._l2_loss_weight * l2_loss
-                + self._perceptual_loss_weight * perceptual_loss
-            )
-
-            commitment_loss = self._loss_beta * out["commitment_loss"]
-
-            generator_loss = self._gan_loss_fn(
-                disc_logits_fake, torch.ones_like(disc_logits_fake)
-            )
-            gan_loss_weight = self._vq_vae.calculate_adaptive_weight(
-                recon_loss, generator_loss
-            )
-
-            vae_loss = (
-                recon_loss
-                + commitment_loss
-                + generator_loss * gan_loss_weight * self._gan_loss_weight
-            )
-            dictionary_loss = out["dictionary_loss"]
-            if dictionary_loss is not None:
-                vae_loss += out["dictionary_loss"]
-
-            # optimize VAE
-            self._vae_optimizer.zero_grad()
-            vae_loss.backward()
-            self._vae_optimizer.step()
-
-            # Discriminator loss
-            disc_loss_real = self._gan_loss_fn(
-                disc_logits_real, torch.ones_like(disc_logits_real)
-            )
-            disc_logits_fake = self._discriminator(out["x_recon"].detach())
-            disc_loss_fake = self._gan_loss_fn(
-                disc_logits_fake, torch.zeros_like(disc_logits_fake)
-            )
-            disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
-
-            # Optimize discriminator
-            self._disc_optimizer.zero_grad()
-            disc_loss.backward()
-            self._disc_optimizer.step()
-
-            # Logging
-            commitment_epoch_loss += commitment_loss.item()
-            l1_epoch_loss += l1_loss.item()
-            l2_epoch_loss += l2_loss.item()
-            perceptual_epoch_loss += perceptual_loss.item()
-            gan_epoch_loss["generator"] += generator_loss.item()
-            gan_epoch_loss["discriminator"] += disc_loss.item()
-
-            if batch % 1000 == 0:
-                print(
-                    f"batch loss: {recon_loss.item():>7f} [{batch:>5d}/{len(self._train_dataloader):>5d}]"
-                )
-                self.plot_sample(
-                    x[0, :],
-                    out["x_recon"][0, :],
-                    torch.sigmoid(disc_logits_real[0, 0, :]),
-                    torch.sigmoid(disc_logits_fake[0, 0, :]),
-                    epoch,
-                    batch,
-                    False,
-                )
-
-        commitment_epoch_loss /= len(self._train_dataloader)
-        l1_epoch_loss /= len(self._train_dataloader)
-        l2_epoch_loss /= len(self._train_dataloader)
-        perceptual_epoch_loss /= len(self._train_dataloader)
-        gan_epoch_loss["generator"] /= len(self._train_dataloader)
-        gan_epoch_loss["discriminator"] /= len(self._train_dataloader)
-        print(f"Mean epoch train reconstruction loss (L1): {l1_epoch_loss}")
-
-        return (
-            l1_epoch_loss,
-            l2_epoch_loss,
-            perceptual_epoch_loss,
-            commitment_epoch_loss,
-            gan_epoch_loss,
+        disc_logits_fake = self.discriminator(x_recon.detach())
+        disc_loss_fake = self.bce_loss(
+            disc_logits_fake, torch.zeros_like(disc_logits_fake)
         )
-
-    @torch.no_grad
-    def calculate_test_loss(self, epoch: int):
-        self._vq_vae.eval()
-        self._discriminator.eval()
-
-        recon_test_loss = 0
-
-        for batch, x in enumerate(self._test_dataloader):
-            x = x.to(self._device)
-            out = self._vq_vae(x)
-            recon_test_loss += self._l1_loss_fn(out["x_recon"], x).item()
-
-            disc_logits_real = self._discriminator(x)
-            disc_logits_fake = self._discriminator(out["x_recon"])
-
-            if batch % 500 == 0:
-                self.plot_sample(
-                    x[0, :],
-                    out["x_recon"][0, :],
-                    torch.sigmoid(disc_logits_real[0, 0, :]),
-                    torch.sigmoid(disc_logits_fake[0, 0, :]),
-                    epoch,
-                    batch,
-                    True,
-                )
-
-        recon_test_loss /= len(self._test_dataloader)
-        print(f"Mean test reconstruction loss: {recon_test_loss:>8f} \n")
-
-        return recon_test_loss
-
-    def generate_loss_plot(self, suffix: str = ""):
-        fig, ax = plt.subplots()
-        (plt1,) = ax.plot(self._train_loss["l1_loss"], label="Train L1 (recon.) loss")
-        (plt2,) = ax.plot(self._train_loss["l2_loss"], label="Train L2 (recon.) loss")
-        (plt3,) = ax.plot(self._train_loss["perceptual_loss"], label="Perceptual loss")
-        (plt4,) = ax.plot(
-            self._train_loss["commitment_loss"], label="Train (commitment) loss"
+        disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
+        self.logger.add_scalar("train_discriminator_loss", disc_loss, self.global_step)
+        self.logger.add_scalar(
+            "train_discriminator_real_loss", disc_loss_real, self.global_step
         )
-        (plt5,) = ax.plot(
-            self._train_loss["gan_loss"]["generator"], label="Generator GAN loss"
+        self.logger.add_scalar(
+            "train_discriminator_fake_loss", disc_loss_fake, self.global_step
         )
-        (plt6,) = ax.plot(
-            self._train_loss["gan_loss"]["discriminator"],
-            label="Discriminator GAN loss",
+        if log_output:
+            self.log_images(
+                nn.functional.sigmoid(disc_logits_real),
+                nn.functional.sigmoid(disc_logits_fake),
+                "train_discriminator",
+                normalize=False,
+            )
+        return disc_loss
+
+    def training_step(self, x: torch.Tensor):
+        z, dict_loss, commitment_loss, entropy, _ = self.encode(x)
+        x_recon = self.decode(z)
+
+        # L1 reconstruction loss
+        reconstruction_loss = self.reconstruction_loss(x, x_recon)
+
+        # Perceptual loss
+        self.perceptual.eval()
+        perceptual_loss = torch.squeeze(self.perceptual(x, x_recon)).mean()
+        nll_loss = reconstruction_loss + self.perceptual_loss_weight * perceptual_loss
+
+        # Genrator GAN loss
+        disc_logits_fake = self.discriminator(x_recon)
+        generator_loss = self.bce_loss(
+            disc_logits_fake, torch.ones_like(disc_logits_fake)
         )
-
-        (plt7,) = ax.plot(
-            self._test_loss["reconstruction_loss"], label="Test L1 (recon.) loss"
+        generator_adaptive_weight = self.calculate_adaptive_weight(
+            nll_loss, generator_loss
         )
-        ax.set_xlabel("Epoch [-]")
-        ax.set_ylabel("Loss")
-
-        axr = ax.twinx()
-        (plt8,) = axr.plot(
-            self._embedding_entropy, label="Embedding selection entropy", color="k"
+        gan_weight = adopt_weight(
+            self.gan_weight,
+            self.global_step,
+            threshold=self.gan_start_steps,
         )
-        axr.set_ylabel("Entropy")
-
-        lines = [plt1, plt2, plt3, plt4, plt5, plt6, plt7, plt8]
-        ax.legend(lines, [line.get_label() for line in lines])
-
-        fig.savefig(self._output_path / f"loss_plot_{suffix}.png")
-        plt.close(fig)
-
-    def plot_codebook_usage(self, suffix: str = ""):
-        codebook_usage_counts = self._vq_vae.get_codebook_usage_counts()
-        fig, ax = plt.subplots()
-        ax.scatter(
-            x=list(range(len(codebook_usage_counts))),
-            y=codebook_usage_counts,
+        generator_loss_weight = generator_adaptive_weight * gan_weight
+        vae_loss = (
+            nll_loss
+            + generator_loss_weight * generator_loss
+            + self.commitment_loss_weight * commitment_loss
         )
-        ax.set_xlabel("Codebook index")
-        ax.set_ylabel("Count")
+        if dict_loss is not None:
+            vae_loss += dict_loss
 
-        fig.savefig(self._output_path / f"codebook_usage_counts_{suffix}.png")
-        plt.close(fig)
+        log_images = self.global_step % 100 == 0
 
-    @staticmethod
-    def image_tensor_to_array(image: torch.Tensor):
-        arr = image.cpu().detach().numpy()
-        np.clip(arr, 0, 1, out=arr)
-        return np.transpose(arr, (1, 2, 0))
+        # Optimize VAE
+        self.optimizers["autoencoder"].zero_grad()
+        vae_loss.backward()
+        self.optimizers["autoencoder"].step()
 
-    def plot_sample(
+        # Optimize Discriminator
+        disc_loss = self.discriminator_loss(x, x_recon, log_images) * gan_weight
+        self.optimizers["discriminator"].zero_grad()
+        disc_loss.backward()
+        self.optimizers["discriminator"].step()
+
+        # log images
+        if log_images:
+            self.log_images(x, x_recon, "train_samples")
+
+        # log
+        self.logger.add_scalar(
+            "train_l1_reconstruction_loss", reconstruction_loss, self.global_step
+        )
+        self.logger.add_scalar(
+            "train_perceptual_loss", perceptual_loss, self.global_step
+        )
+        self.logger.add_scalar("train_generator_loss", generator_loss, self.global_step)
+        self.logger.add_scalar(
+            "train_generator_adaptive_weight",
+            generator_adaptive_weight,
+            self.global_step,
+        )
+        self.logger.add_scalar(
+            "train_commitment_loss", commitment_loss, self.global_step
+        )
+        self.logger.add_scalar("train_codebook_entropy", entropy, self.global_step)
+
+        self.update_lr_schedulers()
+
+    def update_lr_schedulers(self):
+        self.logger.add_scalar(
+            "vae_lr",
+            self.lr_schedulers["autoencoder"].get_last_lr()[0],
+            self.global_step,
+        )
+        self.logger.add_scalar(
+            "disc_lr",
+            self.lr_schedulers["discriminator"].get_last_lr()[0],
+            self.global_step,
+        )
+        if (
+            self.gan_start_steps
+            < self.global_step
+            < (self.gan_start_steps + self.cosine_decay_steps)
+        ):
+            self.lr_schedulers["autoencoder"].step()
+            self.lr_schedulers["discriminator"].step()
+
+    def log_images(
         self,
-        x: torch.Tensor,
-        x_recon: torch.Tensor,
-        real_probs_real: torch.Tensor,
-        real_probs_fake: torch.Tensor,
-        epoch: int,
-        batch: int,
-        validation: bool,
+        x_real: torch.Tensor,
+        x_fake: torch.Tensor,
+        log_name: str,
+        normalize: bool = True,
     ):
-        fig, ax = plt.subplots(nrows=2, ncols=2)
-        ax[0, 0].imshow(VqVaeTrainer.image_tensor_to_array(x))
-        ax[0, 0].axis("off")
-        ax[0, 0].set_title("Input image")
-        ax[1, 0].imshow(VqVaeTrainer.image_tensor_to_array(x_recon))
-        ax[1, 0].axis("off")
-        ax[1, 0].set_title("Reconstructed image")
-
-        im1 = ax[0, 1].imshow(
-            np.clip(real_probs_real.cpu().detach().numpy(), 0, 1), vmin=0, vmax=1
+        images = []
+        images.extend(
+            [
+                denormalize_image(x_real[i, :]) if normalize else x_real[i, :]
+                for i in range(x_real.shape[0])
+            ]
         )
-        ax[0, 1].axis("off")
-        cb1 = plt.colorbar(im1, ax=ax[0, 1])
-        cb1.set_label("Real probability")
-
-        im2 = ax[1, 1].imshow(
-            np.clip(real_probs_fake.cpu().detach().numpy(), 0, 1), vmin=0, vmax=1
+        images.extend(
+            [
+                denormalize_image(x_fake[i, :]) if normalize else x_fake[i, :]
+                for i in range(x_fake.shape[0])
+            ]
         )
-        ax[1, 1].axis("off")
-        cb2 = plt.colorbar(im2, ax=ax[1, 1])
-        cb2.set_label("Real probability")
-
-        output_path = (
-            self._output_path / "validation"
-            if validation
-            else self._output_path / "train"
+        self.logger.add_image(
+            log_name,
+            make_grid(
+                images, nrow=x_real.shape[0]
+            ),  # TODO: Use the normalize flag here
+            self.global_step,
         )
-        output_path = output_path / f"ep{epoch:02}"
-        output_path.mkdir(parents=True, exist_ok=True)
 
-        fig.savefig(output_path / f"image_reconstruction_b{batch:06}.png")
-        plt.close(fig)
+    def configure_optimizers(
+        self, initial_lr: float, final_lr: float, cosine_decay_steps: int
+    ):
+        # Autoencoder
+        opt_ae = torch.optim.Adam(
+            list(self.encoder.parameters())
+            + list(self.decoder.parameters())
+            + list(self.quantizer.parameters())
+            + list(self.pre_quant_conv.parameters())
+            + list(self.post_quant_conv.parameters()),
+            lr=initial_lr,
+            betas=(0.5, 0.9),
+        )
+        lr_sched_ae = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt_ae, T_max=cosine_decay_steps, eta_min=final_lr
+        )
 
-    @staticmethod
-    def split_list(list_to_split: list, shuffle: bool = False, ratio: float = 0.5):
+        # Discriminator
+        opt_disc = torch.optim.Adam(
+            self.discriminator.parameters(), lr=initial_lr, betas=(0.5, 0.9)
+        )
+        lr_sched_disc = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt_disc, T_max=cosine_decay_steps, eta_min=final_lr
+        )
+        return {"autoencoder": opt_ae, "discriminator": opt_disc}, {
+            "autoencoder": lr_sched_ae,
+            "discriminator": lr_sched_disc,
+        }
 
-        if shuffle:
-            random.seed(10)
-            random.shuffle(list_to_split)
+    def get_last_decoder_layer(self):
+        return self.decoder.conv_out.weight
 
-        split_index = int(len(list_to_split) * ratio)
+    def calculate_adaptive_weight(self, rec_loss, gen_loss):
+        last_layer = self.get_last_decoder_layer()
+        rec_grads = torch.autograd.grad(rec_loss, last_layer, retain_graph=True)[0]
+        gen_grads = torch.autograd.grad(gen_loss, last_layer, retain_graph=True)[0]
 
-        if split_index == 0:
-            raise ValueError(
-                f"List of length {len(list_to_split)} can't be splitted with ratio {ratio}."
-            )
-
-        front_sublist = list_to_split[:split_index]
-        back_sublist = list_to_split[split_index:]
-
-        return front_sublist, back_sublist
+        d_weight = torch.norm(rec_grads) / (torch.norm(gen_grads) + 1e-4)
+        d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
+        return d_weight

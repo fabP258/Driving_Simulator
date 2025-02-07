@@ -2,10 +2,10 @@ import os
 import random
 from pathlib import Path
 
-import lightning
-from lightning.pytorch.loggers import TensorBoardLogger
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 
+from trainer import VqVaeTrainer
 from dataset import DrivingDataset
 from lit_vq_vae import LitVqVae
 from vq_vae import VqVaeConfig
@@ -28,7 +28,7 @@ def split_list(list_to_split: list, shuffle: bool = False, ratio: float = 0.5):
 def get_segment_folders():
     segment_folders = []
 
-    for chunk_idx in range(4, 5):
+    for chunk_idx in range(4, 8):
         chunk_path = "/home/fabio/comma2k19/Chunk_" + f"{chunk_idx}"
         print(chunk_path)
         baselevel = len(chunk_path.split(os.path.sep))
@@ -43,14 +43,14 @@ def get_segment_folders():
 if __name__ == "__main__":
 
     # Setup logger
-    log_path = Path(__file__).parent / "logs"
+    log_path = Path(__file__).parent / "logsv2"
     log_path.mkdir(exist_ok=True, parents=True)
-    logger = TensorBoardLogger(log_path, name="vq_gan_logs")
+    writer = SummaryWriter()
 
     vq_vae = LitVqVae(VqVaeConfig())
     segment_folders = get_segment_folders()
     segment_folders_train, segment_folders_test = split_list(
-        segment_folders[:40], shuffle=True, ratio=0.8
+        segment_folders, shuffle=True, ratio=0.8
     )
     train_dataloader = DataLoader(
         DrivingDataset(segment_folders_train),
@@ -65,9 +65,5 @@ if __name__ == "__main__":
         shuffle=False,
         num_workers=20,
     )
-    trainer = lightning.Trainer(
-        accelerator="gpu", fast_dev_run=False, max_steps=400000, logger=logger
-    )
-    trainer.fit(
-        model=vq_vae, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader
-    )
+    trainer = VqVaeTrainer(train_dataloader)
+    trainer.train()

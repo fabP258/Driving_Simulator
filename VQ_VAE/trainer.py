@@ -65,7 +65,7 @@ class Trainer(ABC):
                 elif isinstance(data, torch.Tensor):
                     data = data.to(self.device)
                 self.training_step(data)
-                if self.global_step % 1000 == 0:
+                if self.global_step % 10000 == 0:
                     self.save_checkpoint(
                         self.log_dir / f"checkpoint_step{self.global_step}.pth"
                     )
@@ -439,11 +439,11 @@ class VqVaeTrainer(Trainer):
             {"class_state": {"global_step": self.global_step, "epoch": self.epoch}}
         )
 
-        torch.save(checkpoint, checkpoint_path)
+        torch.save(checkpoint, checkpoint_path, _use_new_zipfile_serialization=False)
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, device: str = "cuda"):
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
         ctor_args = checkpoint["ctor_args"]
         ctor_args["vae_config"] = VqVaeConfig(**ctor_args["vae_config"])
         trainer = cls(log_dir=Path(checkpoint_path).parent, **ctor_args, device=device)

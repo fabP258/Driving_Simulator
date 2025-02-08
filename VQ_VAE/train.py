@@ -59,7 +59,7 @@ if __name__ == "__main__":
         DrivingDataset(segment_folders_train),
         batch_size=4,
         shuffle=True,
-        num_workers=1,
+        num_workers=2,
     )
     print(f"Training dataset contains {len(train_dataloader.dataset)} images.")
     val_dataloader = DataLoader(
@@ -71,5 +71,5 @@ if __name__ == "__main__":
     if checkpoint_path is not None:
         trainer = VqVaeTrainer.from_checkpoint(checkpoint_path)
     else:
-        trainer = VqVaeTrainer(log_path, gan_start_steps=1000)
+        trainer = VqVaeTrainer(log_path, gan_start_steps=100000)
     trainer.train(train_dataloader)

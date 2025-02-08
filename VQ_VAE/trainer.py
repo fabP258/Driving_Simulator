@@ -267,7 +267,14 @@ class VqVaeTrainer(Trainer):
         self.optimizers["autoencoder"].step()
 
         # Optimize Discriminator
-        disc_loss = self.discriminator_loss(x, x_recon, log_images) * gan_weight
+
+        # recompute fake images with updated model
+        with torch.no_grad():
+            z, dict_loss, commitment_loss, entropy, _ = self.encode(x)
+            x_recon = self.decode(z)
+        disc_loss = (
+            self.discriminator_loss(x, x_recon.detach(), log_images) * gan_weight
+        )
         self.optimizers["discriminator"].zero_grad()
         disc_loss.backward()
         self.optimizers["discriminator"].step()

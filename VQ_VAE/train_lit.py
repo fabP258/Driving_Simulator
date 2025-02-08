@@ -1,6 +1,7 @@
 import os
 import random
 from pathlib import Path
+from datetime import datetime
 
 from torch.utils.data import DataLoader
 
@@ -40,7 +41,11 @@ def get_segment_folders():
 if __name__ == "__main__":
 
     # Setup logger
-    log_path = Path(__file__).parent.parent / "runs"
+    log_path = (
+        Path(__file__).parent.parent
+        / "runs"
+        / datetime.now().strftime("%Y%m%d_%H_%M_%S")
+    )
     log_path.mkdir(exist_ok=True, parents=True)
 
     checkpoint_path = None
@@ -66,5 +71,5 @@ if __name__ == "__main__":
     if checkpoint_path is not None:
         trainer = VqVaeTrainer.from_checkpoint(checkpoint_path)
     else:
-        trainer = VqVaeTrainer(log_path)
+        trainer = VqVaeTrainer(log_path, gan_start_steps=1000)
     trainer.train(train_dataloader)

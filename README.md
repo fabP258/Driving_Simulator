@@ -51,12 +51,6 @@ Now you should be able to open the *TensorBoard* dashboard in the browser at `ht
 * $l_2$-normalization / cosine-similarity in distance calculation
 * Entropy calculation for codebook utilization monitoring during training
 
-## Performance baseline
-
-| Architecture | codebook dim. | codebook size | # Training samples | $\beta$ | Learning rate | Weight decay | Epochs | Batch size | Test reconstruction loss (L2) |
-|----|----|----|----|----|----|----|----|-----|-----|
-|<ul><li>4 Conv2d w/ 4x4 kernel</li><li>2 Residual Blocks</li></ul>| 16 | 2048 | 95475 | 0.25 | $2e^{-4}$ | $0.01$ | 50 | 15 | 0.0060 |
-
 ## References
 
 [1] van den Oord, A., Li, Y., & Vinyals, O. (2017). "Neural discrete representation learning".

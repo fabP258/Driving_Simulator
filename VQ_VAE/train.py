@@ -69,7 +69,7 @@ if __name__ == "__main__":
         num_workers=20,
     )
     if checkpoint_path is not None:
-        trainer = VqVaeTrainer.from_checkpoint(checkpoint_path)
+        trainer = VqVaeTrainer.from_checkpoint(checkpoint_path, log_path)
     else:
         trainer = VqVaeTrainer(log_path, gan_start_steps=100000)
     trainer.train(train_dataloader)

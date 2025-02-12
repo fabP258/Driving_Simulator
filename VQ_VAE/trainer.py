@@ -19,7 +19,7 @@ from lpips import LPIPS
 from taming_model import Encoder, Decoder, VqVaeConfig
 from quantizer import VectorQuantizer
 from discriminator import Discriminator, weights_init
-from dataset import denormalize_image
+from dataset import denormalize_image, normalize_image
 
 
 def adopt_weight(weight, global_step, threshold=0, value=0.0):
@@ -48,6 +48,7 @@ class Trainer(ABC):
             "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
         )
         self.to_device()
+        self.print_parameter_counts()
 
     def train(
         self,
@@ -95,6 +96,19 @@ class Trainer(ABC):
             if isinstance(attr, nn.Module):
                 attr.eval()
 
+    def print_parameter_counts(self):
+        print("--- MODEL PARAMETERS ---")
+        for member in vars(self):
+            attr = getattr(self, member)
+            if isinstance(attr, nn.Module):
+                n_parameters = sum(
+                    p.numel() for p in attr.parameters() if p.requires_grad
+                )
+                if n_parameters < 100000:
+                    print(f"{member}: {n_parameters * 1e-3:.2f} K")
+                else:
+                    print(f"{member}: {n_parameters * 1e-6:.2f} M")
+
     @abstractmethod
     def training_step(self, *args, **kwargs):
         raise NotImplementedError
@@ -129,6 +143,7 @@ class VqVaeTrainer(Trainer):
         final_lr: float = 2.5e-7,
         weight_decay: float = 0.01,
         cosine_decay_steps: int = 50000,
+        disc_updates_per_step: int = 3,
         device: str = "cuda",
     ):
         self.vae_config = vae_config
@@ -152,7 +167,7 @@ class VqVaeTrainer(Trainer):
         )
         self.decoder = Decoder(**vae_config.encoder_decoder_args())
         self.discriminator = Discriminator(
-            in_channels=3, num_layers=2, num_hiddens=64
+            in_channels=3, num_layers=4, num_hiddens=128
         ).apply(weights_init)
         self.perceptual = LPIPS(net="vgg")
         self.perceptual_loss_weight = perceptual_loss_weight
@@ -163,6 +178,7 @@ class VqVaeTrainer(Trainer):
         self.l1_loss_weight = l1_loss_weight
         self.l2_loss_weight = l2_loss_weight
         self.cosine_decay_steps = cosine_decay_steps
+        self.disc_updates_per_step = disc_updates_per_step
         self.optimizers, self.lr_schedulers = self.configure_optimizers(
             initial_lr, final_lr, cosine_decay_steps, weight_decay
         )
@@ -192,17 +208,13 @@ class VqVaeTrainer(Trainer):
     def l2_reconstruction_loss(x: torch.Tensor, x_recon: torch.tensor):
         return torch.mean((x - x_recon) ** 2)
 
-    def discriminator_loss(
-        self, x: torch.Tensor, x_recon: torch.Tensor, log_output: bool
+    def calc_discriminator_loss(
+        self, x: torch.Tensor, x_recon: torch.Tensor, log_images: bool
     ):
-        disc_logits_real = self.discriminator(x)
-        disc_loss_real = self.bce_loss(
-            disc_logits_real, torch.ones_like(disc_logits_real)
-        )
-        disc_logits_fake = self.discriminator(x_recon.detach())
-        disc_loss_fake = self.bce_loss(
-            disc_logits_fake, torch.zeros_like(disc_logits_fake)
-        )
+        logits_real = self.discriminator(x)
+        logits_fake = self.discriminator(x_recon.detach())
+        disc_loss_real = self.bce_loss(logits_real, torch.ones_like(logits_real))
+        disc_loss_fake = self.bce_loss(logits_fake, torch.zeros_like(logits_fake))
         disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
         self.logger.add_scalar("train_discriminator_loss", disc_loss, self.global_step)
         self.logger.add_scalar(
@@ -211,44 +223,45 @@ class VqVaeTrainer(Trainer):
         self.logger.add_scalar(
             "train_discriminator_fake_loss", disc_loss_fake, self.global_step
         )
-        if log_output:
+        if log_images:
             self.log_images(
-                nn.functional.sigmoid(disc_logits_real),
-                nn.functional.sigmoid(disc_logits_fake),
+                nn.functional.sigmoid(logits_real),
+                nn.functional.sigmoid(logits_fake),
                 "train_discriminator",
                 normalize=False,
             )
         return disc_loss
 
-    def training_step(self, x: torch.Tensor):
-        z, dict_loss, commitment_loss, entropy, _ = self.encode(x)
-        x_recon = self.decode(z)
-
-        # L1 reconstruction loss
+    def training_step_generator(
+        self,
+        x: torch.Tensor,
+        x_recon: torch.Tensor,
+        commitment_loss: torch.Tensor,
+        dict_loss: Union[None, torch.tensor],
+        gan_weight: float,
+    ):
+        # L1 & L2 reconstruction loss
         l1_reconstruction_loss = self.l1_reconstruction_loss(x, x_recon)
-        l2_reconsruction_loss = self.l2_reconstruction_loss(x, x_recon)
+        l2_reconstruction_loss = self.l2_reconstruction_loss(x, x_recon)
         reconstruction_loss = (
             self.l1_loss_weight * l1_reconstruction_loss
-            + self.l2_loss_weight * l2_reconsruction_loss
+            + self.l2_loss_weight * l2_reconstruction_loss
         )
 
         # Perceptual loss
         self.perceptual.eval()
-        perceptual_loss = torch.squeeze(self.perceptual(x, x_recon)).mean()
+        perceptual_loss = torch.squeeze(
+            self.perceptual(normalize_image(x), normalize_image(x_recon))
+        ).mean()
         nll_loss = reconstruction_loss + self.perceptual_loss_weight * perceptual_loss
 
-        # Genrator GAN loss
+        # Generator GAN loss
         disc_logits_fake = self.discriminator(x_recon)
         generator_loss = self.bce_loss(
             disc_logits_fake, torch.ones_like(disc_logits_fake)
         )
         generator_adaptive_weight = self.calculate_adaptive_weight(
             nll_loss, generator_loss
-        )
-        gan_weight = adopt_weight(
-            self.gan_weight,
-            self.global_step,
-            threshold=self.gan_start_steps,
         )
         generator_loss_weight = generator_adaptive_weight * gan_weight
         vae_loss = (
@@ -259,36 +272,17 @@ class VqVaeTrainer(Trainer):
         if dict_loss is not None:
             vae_loss += dict_loss
 
-        log_images = self.global_step % 100 == 0
-
-        # Optimize VAE
         self.optimizers["autoencoder"].zero_grad()
         vae_loss.backward()
         self.optimizers["autoencoder"].step()
 
-        # Optimize Discriminator
-
-        # recompute fake images with updated model
-        with torch.no_grad():
-            z, dict_loss, commitment_loss, entropy, _ = self.encode(x)
-            x_recon = self.decode(z)
-        disc_loss = (
-            self.discriminator_loss(x, x_recon.detach(), log_images) * gan_weight
-        )
-        self.optimizers["discriminator"].zero_grad()
-        disc_loss.backward()
-        self.optimizers["discriminator"].step()
-
-        # log images
-        if log_images:
-            self.log_images(x, x_recon, "train_samples")
-
-        # log
         self.logger.add_scalar(
             "train_l1_reconstruction_loss", l1_reconstruction_loss, self.global_step
         )
         self.logger.add_scalar(
-            "train_l2_reconstruction_loss", l2_reconsruction_loss, self.global_step
+            "train_l2_reconstruction_loss",
+            l2_reconstruction_loss,
+            self.global_step,
         )
         self.logger.add_scalar(
             "train_perceptual_loss", perceptual_loss, self.global_step
@@ -299,10 +293,43 @@ class VqVaeTrainer(Trainer):
             generator_adaptive_weight,
             self.global_step,
         )
+
+    def training_step(self, x: torch.Tensor):
+        z, dict_loss, commitment_loss, entropy, _ = self.encode(x)
+        x_recon = self.decode(z)
+
+        # TODO: Group with train/<scalar_name>
         self.logger.add_scalar(
             "train_commitment_loss", commitment_loss, self.global_step
         )
         self.logger.add_scalar("train_codebook_entropy", entropy, self.global_step)
+
+        gan_weight = adopt_weight(
+            self.gan_weight,
+            self.global_step,
+            threshold=self.gan_start_steps,
+        )
+        self.logger.add_scalar("train_gan_weight", gan_weight, self.global_step)
+
+        log_images = self.global_step % 100 == 0
+        if log_images:
+            self.log_images(x, x_recon, "train_samples", normalize=False)
+
+        if self.global_step % (self.disc_updates_per_step + 1) == 0:
+            # Optimize GEN
+            self.training_step_generator(
+                x, x_recon, commitment_loss, dict_loss, gan_weight
+            )
+        else:
+            # Optimize DISC
+            disc_loss = self.calc_discriminator_loss(x, x_recon, log_images=log_images)
+            self.logger.add_scalar(
+                "train_discriminator_loss", disc_loss, self.global_step
+            )
+            disc_loss *= gan_weight
+            self.optimizers["discriminator"].zero_grad()
+            disc_loss.backward()
+            self.optimizers["discriminator"].step()
 
         self.update_lr_schedulers()
 
@@ -380,7 +407,6 @@ class VqVaeTrainer(Trainer):
             self.discriminator.parameters(),
             lr=initial_lr,
             betas=(0.5, 0.9),
-            weight_decay=weight_decay,
         )
         lr_sched_disc = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt_disc, T_max=cosine_decay_steps, eta_min=final_lr
@@ -430,6 +456,7 @@ class VqVaeTrainer(Trainer):
                     "cosine_decay_steps": self.cosine_decay_steps,
                     "l1_loss_weight": self.l1_loss_weight,
                     "l2_loss_weight": self.l2_loss_weight,
+                    "disc_updates_per_step": self.disc_updates_per_step,
                 }
             }
         )
@@ -442,11 +469,13 @@ class VqVaeTrainer(Trainer):
         torch.save(checkpoint, checkpoint_path, _use_new_zipfile_serialization=False)
 
     @classmethod
-    def from_checkpoint(cls, checkpoint_path: str, device: str = "cuda"):
+    def from_checkpoint(
+        cls, checkpoint_path: str, log_path: Union[str, Path], device: str = "cuda"
+    ):
         checkpoint = torch.load(checkpoint_path, map_location=device)
         ctor_args = checkpoint["ctor_args"]
         ctor_args["vae_config"] = VqVaeConfig(**ctor_args["vae_config"])
-        trainer = cls(log_dir=Path(checkpoint_path).parent, **ctor_args, device=device)
+        trainer = cls(log_dir=log_path, **ctor_args, device=device)
 
         for member_name in vars(trainer):
             attr = getattr(trainer, member_name)

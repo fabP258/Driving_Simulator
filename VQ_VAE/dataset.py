@@ -1,5 +1,6 @@
 import os
 import torch
+import numpy as np
 from typing import List
 from pathlib import Path
 from PIL import Image
@@ -70,5 +71,54 @@ class DrivingDataset(Dataset):
             self.segment_path_list[segment_index] / f"images/{frame_index:04}.png"
         )
         image_tensor = self.transforms(self.read_image(image_path))
-        image_tensor = normalize_image(image_tensor)
         return image_tensor
+
+
+class NpDataset(Dataset):
+    """A fast dataset for video frames stored as np arrays"""
+
+    def __init__(self, tensor_path_list: List[Path]):
+        self.tensor_path_list: List[Path] = []
+
+        self.frame_start_indices = []
+        self.frame_count = 0
+        for tensor_path in tensor_path_list:
+
+            # check for data availability
+            if not tensor_path.is_file():
+                continue
+
+            # get number of frames
+            frame_tensor = np.load(tensor_path, mmap_mode="r")
+            n_frames = frame_tensor.shape[0]
+
+            # skip segment if image directory does not contain any images
+            if n_frames == 0:
+                continue
+
+            self.tensor_path_list.append(tensor_path)
+            self.frame_start_indices.append(self.frame_count)
+            self.frame_count += n_frames
+
+    def __len__(self):
+        return self.frame_count
+
+    def get_segment_index(self, index: int) -> int:
+        if index < self.frame_start_indices[-1]:
+            segment_index = next(
+                x[0] for x in enumerate(self.frame_start_indices) if x[1] > index
+            )
+        else:
+            segment_index = len(self.frame_start_indices)
+        segment_index -= 1
+        return segment_index
+
+    def __getitem__(self, index):
+        segment_index = self.get_segment_index(index)
+        mapped_video_tensor = np.load(
+            self.tensor_path_list[segment_index], mmap_mode="r"
+        )
+        frame_index = index - self.frame_start_indices[segment_index]
+
+        frame_tensor = torch.tensor(mapped_video_tensor[frame_index, :])
+        return frame_tensor

@@ -18,6 +18,23 @@ def denormalize_image(x: torch.Tensor) -> torch.Tensor:
     return (x + 1.0) / 2.0
 
 
+class ImageDataset(Dataset):
+    """A simple dataset for images stored as png files."""
+
+    def __init__(self, image_paths: List[Path]):
+        self.image_files = image_paths
+        self.transforms = transforms.Compose(
+            [transforms.Resize((288, 512)), transforms.ToTensor()]
+        )
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, index):
+        rgb_image = Image.open(self.image_files[index]).convert("RGB")
+        return self.transforms(rgb_image)
+
+
 class DrivingDataset(Dataset):
     def __init__(self, segment_path_list: List[Path]):
         self.segment_path_list: List[Path] = []

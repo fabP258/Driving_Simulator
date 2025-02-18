@@ -5,7 +5,7 @@ from datetime import datetime
 from torch.utils.data import DataLoader
 
 from trainer import VqVaeTrainer
-from dataset import NpDataset
+from dataset import ImageDataset
 
 
 def split_list(list_to_split: list, shuffle: bool = False, ratio: float = 0.5):
@@ -33,33 +33,33 @@ if __name__ == "__main__":
     log_path.mkdir(exist_ok=True, parents=True)
 
     checkpoint_path = None
-
+    """
     checkpoint_path = (
         Path(__file__).parent.parent
         / "runs"
         / "20250212_18_19_38"
         / "checkpoint_step30000.pth"
     )
-
-    tensor_paths = list(Path("/home/fabio/comma2k19").rglob("*.npy"))
-    tensor_paths_train, tensor_paths_test = split_list(
-        tensor_paths, shuffle=True, ratio=0.9
+    """
+    image_paths = list(Path("/home/fabio/Data/Dashcam").rglob("*.png"))
+    image_paths_train, image_paths_test = split_list(
+        image_paths, shuffle=True, ratio=0.9
     )
     train_dataloader = DataLoader(
-        NpDataset(tensor_paths_train),
-        batch_size=4,
+        ImageDataset(image_paths_train),
+        batch_size=3,
         shuffle=True,
-        num_workers=1,
+        num_workers=4,
     )
     print(f"Training dataset contains {len(train_dataloader.dataset)} images.")
     val_dataloader = DataLoader(
-        NpDataset(tensor_paths_test),
-        batch_size=4,
+        ImageDataset(image_paths_test),
+        batch_size=3,
         shuffle=False,
         num_workers=20,
     )
     if checkpoint_path is not None:
         trainer = VqVaeTrainer.from_checkpoint(checkpoint_path, log_path)
     else:
-        trainer = VqVaeTrainer(log_path, gan_start_steps=100000)
+        trainer = VqVaeTrainer(log_path, gan_start_steps=250000)
     trainer.train(train_dataloader)

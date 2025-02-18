@@ -182,6 +182,8 @@ class VqVaeTrainer(Trainer):
         self.optimizers, self.lr_schedulers = self.configure_optimizers(
             initial_lr, final_lr, cosine_decay_steps, weight_decay
         )
+        self.generator_step = 0
+        self.discriminator_step = 0
         super().__init__(log_dir, device)
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
@@ -228,6 +230,7 @@ class VqVaeTrainer(Trainer):
                 nn.functional.sigmoid(logits_real),
                 nn.functional.sigmoid(logits_fake),
                 "train_discriminator",
+                self.discriminator_step,
                 normalize=False,
             )
         return disc_loss
@@ -277,21 +280,23 @@ class VqVaeTrainer(Trainer):
         self.optimizers["autoencoder"].step()
 
         self.logger.add_scalar(
-            "train_l1_reconstruction_loss", l1_reconstruction_loss, self.global_step
+            "train_l1_reconstruction_loss", l1_reconstruction_loss, self.generator_step
         )
         self.logger.add_scalar(
             "train_l2_reconstruction_loss",
             l2_reconstruction_loss,
-            self.global_step,
+            self.generator_step,
         )
         self.logger.add_scalar(
-            "train_perceptual_loss", perceptual_loss, self.global_step
+            "train_perceptual_loss", perceptual_loss, self.generator_step
         )
-        self.logger.add_scalar("train_generator_loss", generator_loss, self.global_step)
+        self.logger.add_scalar(
+            "train_generator_loss", generator_loss, self.generator_step
+        )
         self.logger.add_scalar(
             "train_generator_adaptive_weight",
             generator_adaptive_weight,
-            self.global_step,
+            self.generator_step,
         )
 
     def training_step(self, x: torch.Tensor):
@@ -300,36 +305,43 @@ class VqVaeTrainer(Trainer):
 
         # TODO: Group with train/<scalar_name>
         self.logger.add_scalar(
-            "train_commitment_loss", commitment_loss, self.global_step
+            "train_commitment_loss", commitment_loss, self.generator_step
         )
-        self.logger.add_scalar("train_codebook_entropy", entropy, self.global_step)
+        self.logger.add_scalar("train_codebook_entropy", entropy, self.generator_step)
 
         gan_weight = adopt_weight(
             self.gan_weight,
-            self.global_step,
+            self.generator_step,
             threshold=self.gan_start_steps,
         )
-        self.logger.add_scalar("train_gan_weight", gan_weight, self.global_step)
+        self.logger.add_scalar("train_gan_weight", gan_weight, self.generator_step)
 
-        log_images = self.global_step % 100 == 0
+        log_images = self.generator_step % 100 == 0
         if log_images:
-            self.log_images(x, x_recon, "train_samples", normalize=False)
+            self.log_images(
+                x, x_recon, "train_samples", self.generator_step, normalize=False
+            )
 
-        if self.global_step % (self.disc_updates_per_step + 1) == 0:
+        if (
+            self.global_step % (self.disc_updates_per_step + 1) == 0
+            or self.generator_step < self.gan_start_steps
+        ):
             # Optimize GEN
             self.training_step_generator(
                 x, x_recon, commitment_loss, dict_loss, gan_weight
             )
+            self.generator_step += 1
         else:
             # Optimize DISC
             disc_loss = self.calc_discriminator_loss(x, x_recon, log_images=log_images)
             self.logger.add_scalar(
-                "train_discriminator_loss", disc_loss, self.global_step
+                "train_discriminator_loss", disc_loss, self.discriminator_step
             )
             disc_loss *= gan_weight
             self.optimizers["discriminator"].zero_grad()
             disc_loss.backward()
             self.optimizers["discriminator"].step()
+            self.discriminator_step += 1
 
         self.update_lr_schedulers()
 
@@ -357,6 +369,7 @@ class VqVaeTrainer(Trainer):
         x_real: torch.Tensor,
         x_fake: torch.Tensor,
         log_name: str,
+        step: int,
         normalize: bool = True,
     ):
         images = []
@@ -377,7 +390,7 @@ class VqVaeTrainer(Trainer):
             make_grid(
                 images, nrow=x_real.shape[0]
             ),  # TODO: Use the normalize flag here
-            self.global_step,
+            step,
         )
 
     def configure_optimizers(
@@ -463,7 +476,14 @@ class VqVaeTrainer(Trainer):
 
         # save class state
         checkpoint.update(
-            {"class_state": {"global_step": self.global_step, "epoch": self.epoch}}
+            {
+                "class_state": {
+                    "global_step": self.global_step,
+                    "epoch": self.epoch,
+                    "generator_step": self.generator_step,
+                    "discriminator_step": self.discriminator_step,
+                }
+            }
         )
 
         torch.save(checkpoint, checkpoint_path, _use_new_zipfile_serialization=False)
@@ -492,6 +512,8 @@ class VqVaeTrainer(Trainer):
 
         trainer.global_step = checkpoint["class_state"]["global_step"]
         trainer.epoch = checkpoint["class_state"]["epoch"]
+        trainer.generator_step = checkpoint["class_state"]["generator_step"]
+        trainer.discriminator_step = checkpoint["class_state"]["discriminator_step"]
 
         return trainer
 

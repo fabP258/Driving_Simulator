@@ -52,7 +52,7 @@ class VectorQuantizer(nn.Module):
         self.cluster_count_ma = ExponentialMovingAverage(ema_decay, (num_embeddings,))
         self.embedding_sums = ExponentialMovingAverage(ema_decay, embedding_table.shape)
 
-        self.register_buffer("data_initialized", torch.zeros(1))
+        self.register_buffer("data_initialized", torch.ones(1))
 
     def forward(self, x):
         # [B, C, H, W] -> [B, H, W, C] -> [B x H x W, C]

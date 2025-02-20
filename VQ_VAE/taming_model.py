@@ -8,15 +8,15 @@ from dataclasses import dataclass
 class VqVaeConfig:
     in_channels: int = 3
     out_channels: int = 3
-    ch_mult: tuple[int] = (1, 1, 2, 2, 4)
+    ch_mult: tuple[int] = (1, 2, 2, 4, 8)
     attn_resolutions: tuple[int] = (16,)
     resolution: int = 256
     num_res_blocks: int = 2
-    z_channels: int = 256
-    vocab_size: int = 1024
+    z_channels: int = 1024
+    vocab_size: int = 8192
     ch: int = 128
     dropout: float = 0.0
-    double_z: bool = True
+    double_z: bool = False
     embedding_dim: int = 256
     use_l2_normalization: bool = False
     use_ema: bool = True
@@ -34,6 +34,7 @@ class VqVaeConfig:
             "in_channels": self.in_channels,
             "resolution": self.resolution,
             "z_channels": self.z_channels,
+            "double_z": self.double_z,
         }
         return kw_args
 

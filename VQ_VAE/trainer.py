@@ -16,7 +16,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 from lpips import LPIPS
 
-from taming_model import Encoder, Decoder, VqVaeConfig
+# from taming_model import Encoder, Decoder, VqVaeConfig
+from model import Encoder, Decoder
 from quantizer import VectorQuantizer
 from discriminator import Discriminator, weights_init
 from dataset import denormalize_image, normalize_image
@@ -132,7 +133,6 @@ class VqVaeTrainer(Trainer):
     def __init__(
         self,
         log_dir: str,
-        vae_config: VqVaeConfig = VqVaeConfig(),
         perceptual_loss_weight: float = 0.1,
         gan_weight: float = 1.0,
         gan_start_steps: int = 50000,
@@ -146,26 +146,17 @@ class VqVaeTrainer(Trainer):
         disc_updates_per_step: int = 3,
         device: str = "cuda",
     ):
-        self.vae_config = vae_config
         # nn.Modules used for training
-        self.encoder = Encoder(**vae_config.encoder_decoder_args())
-        self.pre_quant_conv = nn.Conv2d(
-            in_channels=(
-                2 * vae_config.z_channels
-                if vae_config.double_z
-                else vae_config.z_channels
-            ),
-            out_channels=vae_config.embedding_dim,
-            kernel_size=1,
+        self.encoder = Encoder()
+        self.quantizer = VectorQuantizer(
+            embedding_dim=1024,
+            num_embeddings=8192,
+            use_l2_normalization=True,
+            use_ema=True,
+            ema_decay=0.99,
+            ema_eps=1e-5,
         )
-        self.quantizer = VectorQuantizer(**vae_config.quantizer_args())
-        self.post_quant_conv = nn.Conv2d(
-            in_channels=vae_config.embedding_dim,
-            out_channels=vae_config.z_channels,
-            kernel_size=3,
-            padding=1,
-        )
-        self.decoder = Decoder(**vae_config.encoder_decoder_args())
+        self.decoder = Decoder()
         self.discriminator = Discriminator(
             in_channels=3, num_layers=4, num_hiddens=128
         ).apply(weights_init)
@@ -190,13 +181,11 @@ class VqVaeTrainer(Trainer):
 
     def encode(self, x: torch.Tensor):
         h = self.encoder(x)
-        h = self.pre_quant_conv(h)
         quant, dict_loss, commitment_loss, entropy, enc_indices = self.quantizer(h)
         return quant, dict_loss, commitment_loss, entropy, enc_indices
 
     def decode(self, x):
-        h = self.post_quant_conv(x)
-        x_recon = self.decoder(h)
+        x_recon = self.decoder(x)
         return x_recon
 
     def decode_code(self, code):
@@ -404,9 +393,7 @@ class VqVaeTrainer(Trainer):
         opt_ae = torch.optim.Adam(
             list(self.encoder.parameters())
             + list(self.decoder.parameters())
-            + list(self.quantizer.parameters())
-            + list(self.pre_quant_conv.parameters())
-            + list(self.post_quant_conv.parameters()),
+            + list(self.quantizer.parameters()),
             lr=initial_lr,
             betas=(0.5, 0.9),
             weight_decay=weight_decay,
@@ -461,7 +448,6 @@ class VqVaeTrainer(Trainer):
         checkpoint.update(
             {
                 "ctor_args": {
-                    "vae_config": asdict(self.vae_config),
                     "perceptual_loss_weight": self.perceptual_loss_weight,
                     "gan_weight": self.gan_weight,
                     "gan_start_steps": self.gan_start_steps,
@@ -494,7 +480,6 @@ class VqVaeTrainer(Trainer):
     ):
         checkpoint = torch.load(checkpoint_path, map_location=device)
         ctor_args = checkpoint["ctor_args"]
-        ctor_args["vae_config"] = VqVaeConfig(**ctor_args["vae_config"])
         trainer = cls(log_dir=log_path, **ctor_args, device=device)
 
         for member_name in vars(trainer):
@@ -518,7 +503,7 @@ class VqVaeTrainer(Trainer):
         return trainer
 
     def get_last_decoder_layer(self):
-        return self.decoder.conv_out.weight
+        return self.decoder.out_conv.weight
 
     def calculate_adaptive_weight(self, rec_loss, gen_loss):
         last_layer = self.get_last_decoder_layer()

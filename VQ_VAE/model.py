@@ -8,11 +8,12 @@ class Downsample(nn.Module):
         self.conv = nn.Conv2d(
             in_channels, out_channels, kernel_size=4, stride=2, padding=1
         )
-        # TODO: BatchNorm2d?
-        self.nonlinearity = nn.ReLU(inplace=True)
+        self.norm = nn.BatchNorm2d(out_channels)
+        self.nonlinearity = nn.ReLU()
 
     def forward(self, x):
         x = self.conv(x)
+        x = self.norm(x)
         return self.nonlinearity(x)
 
 
@@ -23,11 +24,12 @@ class Upsample(nn.Module):
         self.convt = nn.ConvTranspose2d(
             in_channels, out_channels, kernel_size=4, stride=2, padding=1
         )
-        # TODO: BatchNorm2d?
-        self.nonlinearity = nn.ReLU(inplace=True)
+        self.norm = nn.BatchNorm2d(out_channels)
+        self.nonlinearity = nn.ReLU()
 
     def forward(self, x):
         x = self.convt(x)
+        x = self.norm(x)
         return self.nonlinearity(x)
 
 
@@ -36,16 +38,16 @@ class ResidualBlock(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        # TODO: BatchNorm2d
-        self.nonlinearity = nn.ReLU(inplace=True)
+        self.norm1 = nn.BatchNorm2d(channels)
+        self.nonlinearity = nn.ReLU()
 
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        # TODO: BatchNorm2d?
+        self.norm2 = nn.BatchNorm2d(channels)
 
     def forward(self, x):
         residual = x
-        x = self.nonlinearity(self.conv1(x))
-        x = self.conv2(x)
+        x = self.nonlinearity(self.norm1(self.conv1(x)))
+        x = self.norm2(self.conv2(x))
         return self.nonlinearity(x + residual)
 
 
@@ -67,7 +69,7 @@ class Encoder(nn.Module):
             stride=1,
             padding=2,
         )
-        self.nonlinearity = nn.ReLU(inplace=True)
+        self.nonlinearity = nn.ReLU()
 
         # downsampling
         self.down = nn.ModuleList()
@@ -121,7 +123,7 @@ class Decoder(nn.Module):
             stride=1,
             padding=1,
         )
-        self.nonlinearity = nn.ReLU(inplace=True)
+        self.nonlinearity = nn.ReLU()
 
         self.mid = nn.ModuleList()
         self.mid.append(ResidualBlock(out_channels))

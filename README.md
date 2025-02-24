@@ -23,17 +23,24 @@ Run the following commands in the terminal:
 ```console
 $ conda activate driving_simulator
 $ cd VQ_VAE
-$ python train.py
+$ python cli.py train --image_root_path <folder-path>
+```
+
+To see all possible arguments for the training command run
+
+```console
+$ python cli.py train -h
 ```
 
 ### Monitor a training run on a server
 
 1. On the **server**:
+
 ```console
-tensorboard --logdir ./VQ_VAE/logs --port 6006
+tensorboard --logdir <logs-path> --port 6006
 ```
 
-2. On the **client**:
+2. Forward the port on the **client** via SSH:
 
 ```console
  ssh -L 16006:localhost:6006 <user>@<server-ip>

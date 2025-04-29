@@ -57,7 +57,9 @@ def train(
         num_workers=num_workers,
     )
     if checkpoint_path is None:
-        trainer = VqVaeTrainer(log_path)  # TODO: Add config for c'tor args
+        trainer = VqVaeTrainer(
+            log_path, gan_start_steps=75000
+        )  # TODO: Add config for c'tor args
     else:
         trainer = VqVaeTrainer.from_checkpoint(checkpoint_path, log_path)
     trainer.train(train_dataloader)
@@ -88,7 +90,7 @@ def _create_train_subparser(subparsers: _SubParsersAction) -> None:
         type=int,
         required=False,
         default=10,
-        help="Size of mini-batches used for training and validation.",
+        help="Size of mini-batches used for training and validation. Default: 10.",
     )
     parser.add_argument("--num_workers", type=int, required=False, default=2)
     parser.add_argument(
@@ -115,7 +117,6 @@ def main() -> int:
 
     parser = _create_parser()
     kwargs = vars(parser.parse_args())
-    print(kwargs)
     command = kwargs.pop("command")
 
     _ = command(**kwargs)

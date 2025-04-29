@@ -11,3 +11,4 @@ dependencies:
   - torchvision
   - lpips
   - tqdm
+  - tensorboard

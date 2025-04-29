@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from dataclasses import asdict
 from typing import Union
 from tqdm import tqdm
 
@@ -16,9 +15,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 from lpips import LPIPS
 
-# from taming_model import Encoder, Decoder, VqVaeConfig
 from model import Encoder, Decoder
-from quantizer import VectorQuantizer
+from quantizer import FSQuantizer
 from discriminator import Discriminator, weights_init
 from dataset import denormalize_image, normalize_image
 
@@ -67,7 +65,7 @@ class Trainer(ABC):
                 elif isinstance(data, torch.Tensor):
                     data = data.to(self.device)
                 self.training_step(data)
-                if self.global_step % 10000 == 0:
+                if self.global_step % 50000 == 0:
                     self.save_checkpoint(
                         self.log_dir / f"checkpoint_step{self.global_step}.pth"
                     )
@@ -148,14 +146,7 @@ class VqVaeTrainer(Trainer):
     ):
         # nn.Modules used for training
         self.encoder = Encoder()
-        self.quantizer = VectorQuantizer(
-            embedding_dim=1024,
-            num_embeddings=8192,
-            use_l2_normalization=True,
-            use_ema=True,
-            ema_decay=0.99,
-            ema_eps=1e-5,
-        )
+        self.quantizer = FSQuantizer(levels=[8, 8, 8, 5, 5], dim=1024)
         self.decoder = Decoder()
         self.discriminator = Discriminator(
             in_channels=3, num_layers=4, num_hiddens=128
@@ -181,8 +172,8 @@ class VqVaeTrainer(Trainer):
 
     def encode(self, x: torch.Tensor):
         h = self.encoder(x)
-        quant, dict_loss, commitment_loss, entropy, enc_indices = self.quantizer(h)
-        return quant, dict_loss, commitment_loss, entropy, enc_indices
+        quant, indices = self.quantizer(h)
+        return quant, indices
 
     def decode(self, x):
         x_recon = self.decoder(x)
@@ -228,13 +219,21 @@ class VqVaeTrainer(Trainer):
         self,
         x: torch.Tensor,
         x_recon: torch.Tensor,
-        commitment_loss: torch.Tensor,
-        dict_loss: Union[None, torch.tensor],
         gan_weight: float,
     ):
         # L1 & L2 reconstruction loss
         l1_reconstruction_loss = self.l1_reconstruction_loss(x, x_recon)
         l2_reconstruction_loss = self.l2_reconstruction_loss(x, x_recon)
+        self.logger.add_scalar(
+            "train_l1_reconstruction_loss",
+            l1_reconstruction_loss,
+            self.generator_step,
+        )
+        self.logger.add_scalar(
+            "train_l2_reconstruction_loss",
+            l2_reconstruction_loss,
+            self.generator_step,
+        )
         reconstruction_loss = (
             self.l1_loss_weight * l1_reconstruction_loss
             + self.l2_loss_weight * l2_reconstruction_loss
@@ -245,6 +244,9 @@ class VqVaeTrainer(Trainer):
         perceptual_loss = torch.squeeze(
             self.perceptual(normalize_image(x), normalize_image(x_recon))
         ).mean()
+        self.logger.add_scalar(
+            "train_perceptual_loss", perceptual_loss, self.generator_step
+        )
         nll_loss = reconstruction_loss + self.perceptual_loss_weight * perceptual_loss
 
         # Generator GAN loss
@@ -252,51 +254,30 @@ class VqVaeTrainer(Trainer):
         generator_loss = self.bce_loss(
             disc_logits_fake, torch.ones_like(disc_logits_fake)
         )
-        generator_adaptive_weight = self.calculate_adaptive_weight(
-            nll_loss, generator_loss
-        )
-        generator_loss_weight = generator_adaptive_weight * gan_weight
-        vae_loss = (
-            nll_loss
-            + generator_loss_weight * generator_loss
-            + self.commitment_loss_weight * commitment_loss
-        )
-        if dict_loss is not None:
-            vae_loss += dict_loss
-
-        self.optimizers["autoencoder"].zero_grad()
-        vae_loss.backward()
-        self.optimizers["autoencoder"].step()
-
-        self.logger.add_scalar(
-            "train_l1_reconstruction_loss", l1_reconstruction_loss, self.generator_step
-        )
-        self.logger.add_scalar(
-            "train_l2_reconstruction_loss",
-            l2_reconstruction_loss,
-            self.generator_step,
-        )
-        self.logger.add_scalar(
-            "train_perceptual_loss", perceptual_loss, self.generator_step
-        )
         self.logger.add_scalar(
             "train_generator_loss", generator_loss, self.generator_step
+        )
+        generator_adaptive_weight = self.calculate_adaptive_weight(
+            nll_loss, generator_loss
         )
         self.logger.add_scalar(
             "train_generator_adaptive_weight",
             generator_adaptive_weight,
             self.generator_step,
         )
+        generator_loss_weight = generator_adaptive_weight * gan_weight
+        vae_loss = nll_loss + generator_loss_weight * generator_loss
+
+        self.optimizers["autoencoder"].zero_grad()
+        vae_loss.backward()
+        self.optimizers["autoencoder"].step()
 
     def training_step(self, x: torch.Tensor):
-        z, dict_loss, commitment_loss, entropy, _ = self.encode(x)
-        x_recon = self.decode(z)
+        z_hat, _ = self.encode(x)
+        x_recon = self.decode(z_hat)
 
         # TODO: Group with train/<scalar_name>
-        self.logger.add_scalar(
-            "train_commitment_loss", commitment_loss, self.generator_step
-        )
-        self.logger.add_scalar("train_codebook_entropy", entropy, self.generator_step)
+        # self.logger.add_scalar("train_codebook_entropy", entropy, self.generator_step)
 
         gan_weight = adopt_weight(
             self.gan_weight,
@@ -316,9 +297,7 @@ class VqVaeTrainer(Trainer):
             or self.generator_step < self.gan_start_steps
         ):
             # Optimize GEN
-            self.training_step_generator(
-                x, x_recon, commitment_loss, dict_loss, gan_weight
-            )
+            self.training_step_generator(x, x_recon, gan_weight)
             self.generator_step += 1
         else:
             # Optimize DISC

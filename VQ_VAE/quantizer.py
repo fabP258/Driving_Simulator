@@ -134,3 +134,83 @@ class VectorQuantizer(nn.Module):
             entropy,
             encoding_indices.view(x.shape[0], -1),
         )
+
+
+def round_ste(z: torch.Tensor) -> torch.Tensor:
+    z_hat = torch.round(z)
+    return z + (z_hat - z).detach()
+
+
+class FSQuantizer(nn.Module):
+
+    def __init__(self, levels: list[int], dim: int | None):
+        super().__init__()
+
+        _levels = torch.tensor(levels, dtype=torch.int32)
+        self.register_buffer("_levels", _levels, persistent=False)
+
+        _basis = torch.cumprod(
+            torch.tensor([1] + levels[:-1]), dim=0, dtype=torch.int32
+        )
+        self.register_buffer("_basis", _basis, persistent=False)
+
+        codebook_dim = len(levels)
+        self.codebook_dim = codebook_dim
+
+        self.dim = dim if dim is not None else codebook_dim
+
+        has_projections = self.dim != codebook_dim
+        self.project_in = (
+            nn.Linear(self.dim, codebook_dim) if has_projections else nn.Identity()
+        )
+        self.project_out = (
+            nn.Linear(codebook_dim, self.dim) if has_projections else nn.Identity()
+        )
+
+    def _scale_and_shift(self, z_hat_normalized):
+        half_width = self._levels // 2
+        return (z_hat_normalized * half_width) + half_width
+
+    def _scale_and_shift_inverse(self, zhat):
+        half_width = self._levels // 2
+        return (zhat - half_width) / half_width
+
+    def codes_to_indices(self, z_hat_normalized):
+        """Converts normalized code vectors to implicit codebook indices."""
+        assert z_hat_normalized.shape[-1] == self.codebook_dim
+        z_hat_normalized = self._scale_and_shift(z_hat_normalized)
+        return (z_hat_normalized * self._basis).sum(dim=-1).to(torch.int32)
+
+    def _indices_to_level_indices(self, indices):
+        codes_non_centered = (indices // self._basis) % self._levels
+        return codes_non_centered
+
+    def indices_to_codes(self, indices):
+        """Inverse of `codes_to_indices`."""
+        indices = indices.unsqueeze(-1)
+        level_indices = self._indices_to_level_indices(indices)
+        codes = self._scale_and_shift_inverse(level_indices)
+        codes = self.project_out(codes)
+        codes = codes.permute(0, 3, 1, 2)
+        return codes
+
+    def bound(self, z, eps: float = 1e-3):
+        half_l = (self._levels - 1) * (1 + eps) / 2
+        offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
+        shift = (offset / half_l).atanh()
+        return (z + shift).tanh() * half_l - offset
+
+    def quantize(self, z):
+        quantized = round_ste(self.bound(z))
+        half_width = self._levels // 2
+        return quantized / half_width
+
+    def forward(self, z):
+        # [B, C, H, W] -> [B, H, W, C]
+        z = z.permute(0, 2, 3, 1)
+        z = self.project_in(z)
+        codes = self.quantize(z)
+        indices = self.codes_to_indices(codes)
+        z_quantized = self.project_out(codes)
+        z_quantized = z_quantized.permute(0, 3, 1, 2)
+        return z_quantized, indices

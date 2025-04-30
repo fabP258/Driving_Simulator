@@ -1,5 +1,5 @@
 # Driving_Simulator
-A PyTorch based training framework for a Machine Learning Driving Simulator like the GAIA-1 [4]. Currently only a VQ-GAN image tokenizer is implemented. A transformer-based, action-conditioned world model will follow soon.
+A PyTorch based training framework for a Machine Learning Driving Simulator like the GAIA-1 [4]. Currently only the image tokenizer is implemented. A transformer-based, action-conditioned world model will follow soon.
 
 <img src="img/VQ_GAN.png" alt="Architecture">
 
@@ -22,7 +22,7 @@ Run the following commands in the terminal:
 
 ```console
 $ conda activate driving_simulator
-$ cd VQ_VAE
+$ cd tokenizer
 $ python cli.py train --image_root_path <folder-path>
 ```
 
@@ -50,13 +50,11 @@ Now you should be able to open the *TensorBoard* dashboard in the browser at `ht
 
 ## Implemented features
 
-### VQ-VAE
+### Tokenizer
 
-* VQ-VAE with exponential moving average embedding update from [1]
+* Finite Scalar Quantization (FSQ) [5]
 * GAN loss [2]
 * LPIPS perceptual loss [3]
-* $K$-means initialization on first mini-batch
-* $l_2$-normalization / cosine-similarity in distance calculation
 * Entropy calculation for codebook utilization monitoring during training
 
 ## References
@@ -68,3 +66,5 @@ Now you should be able to open the *TensorBoard* dashboard in the browser at `ht
 [3] Zhang, R., Isola, P., Efros, A. A., Shechtman, E., & Wang, O. (2018). "The Unreasonable Effectiveness of Deep Features as a Perceptual Metric".
 
 [4] Hu, A., Russell, L., Yeo, H., Murez, Z., Fedoseev, G., Kendall, A., Shotton, J., & Corrado, G. (2023). "GAIA-1: A Generative World Model for Autonomous Driving".
+
+[5] Mentzer, F., Minnen, D., Agustsson, E., Tschannen, M. (2023). "Finite Scalar Quantization: VQ-VAE Made Simple".

@@ -58,7 +58,7 @@ def train(
     )
     if checkpoint_path is None:
         trainer = VqVaeTrainer(
-            log_path, gan_start_steps=75000
+            log_path, gan_start_steps=100000
         )  # TODO: Add config for c'tor args
     else:
         trainer = VqVaeTrainer.from_checkpoint(checkpoint_path, log_path)

@@ -167,6 +167,28 @@ class FSQuantizer(nn.Module):
             nn.Linear(codebook_dim, self.dim) if has_projections else nn.Identity()
         )
 
+        # for logging
+        self.codebook_size: int = int(torch.prod(self._levels).item())
+        self.register_buffer(
+            "usage_counts",
+            torch.zeros(self.codebook_size, dtype=torch.int64),
+            persistent=False,
+        )
+
+    def reset(self):
+        self.usage_counts.zero_()
+
+    def get_codebook_usage(self) -> float:
+        unique_codes = torch.count_nonzero(self.usage_counts)
+        codebook_utilization = unique_codes.item() / self.codebook_size
+        return codebook_utilization
+
+    def get_codebook_entropy(self) -> float:
+        probabilities = self.usage_counts / torch.sum(self.usage_counts)
+        probabilities = probabilities[probabilities > 0]  # avoid ln(0)
+        entropy = -torch.sum(probabilities * torch.log(probabilities))
+        return entropy.item()
+
     def _scale_and_shift(self, z_hat_normalized):
         half_width = self._levels // 2
         return (z_hat_normalized * half_width) + half_width
@@ -205,12 +227,22 @@ class FSQuantizer(nn.Module):
         half_width = self._levels // 2
         return quantized / half_width
 
+    def update_codebook_usage(self, indices: torch.tensor):
+        if not self.training:
+            return
+
+        flat = indices.view(-1)
+        with torch.no_grad():
+            counts = torch.bincount(flat, minlength=self.codebook_size)
+            self.usage_counts += counts
+
     def forward(self, z):
         # [B, C, H, W] -> [B, H, W, C]
         z = z.permute(0, 2, 3, 1)
         z = self.project_in(z)
         codes = self.quantize(z)
         indices = self.codes_to_indices(codes)
+        self.update_codebook_usage(indices)
         z_quantized = self.project_out(codes)
         z_quantized = z_quantized.permute(0, 3, 1, 2)
         return z_quantized, indices

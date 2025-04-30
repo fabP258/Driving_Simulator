@@ -72,6 +72,7 @@ class Trainer(ABC):
 
                 self.global_step += 1
                 self.logger.flush()
+            self.post_epoch_hook()
 
             # TODO: Iterate over validation dataloader every x (epochs, batches)?
 
@@ -124,6 +125,10 @@ class Trainer(ABC):
     @abstractmethod
     def from_checkpoint(cls, checkpoint_path: str):
         raise NotImplementedError
+
+    @abstractmethod
+    def post_epoch_hook(self):
+        pass
 
 
 class VqVaeTrainer(Trainer):
@@ -276,8 +281,17 @@ class VqVaeTrainer(Trainer):
         z_hat, _ = self.encode(x)
         x_recon = self.decode(z_hat)
 
+        self.logger.add_scalar(
+            "train/codebook_usage",
+            self.quantizer.get_codebook_usage(),
+            self.global_step,
+        )
+        self.logger.add_scalar(
+            "train/codebook_usage_entropy",
+            self.quantizer.get_codebook_entropy(),
+            self.global_step,
+        )
         # TODO: Group with train/<scalar_name>
-        # self.logger.add_scalar("train_codebook_entropy", entropy, self.generator_step)
 
         gan_weight = adopt_weight(
             self.gan_weight,
@@ -312,6 +326,9 @@ class VqVaeTrainer(Trainer):
             self.discriminator_step += 1
 
         self.update_lr_schedulers()
+
+    def post_epoch_hook(self):
+        self.quantizer.reset()
 
     def update_lr_schedulers(self):
         self.logger.add_scalar(

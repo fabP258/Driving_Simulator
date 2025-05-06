@@ -151,7 +151,7 @@ class VqVaeTrainer(Trainer):
     ):
         # nn.Modules used for training
         self.encoder = Encoder()
-        self.quantizer = FSQuantizer(levels=[8, 8, 8, 5, 5], dim=1024)
+        self.quantizer = FSQuantizer(levels=[8, 8, 8, 5, 5, 5], dim=1024)
         self.decoder = Decoder()
         self.discriminator = Discriminator(
             in_channels=3, num_layers=4, num_hiddens=128

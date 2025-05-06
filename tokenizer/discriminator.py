@@ -1,4 +1,5 @@
 from torch import nn
+from model import NonLocalBlock2D
 
 
 def weights_init(m):
@@ -42,9 +43,11 @@ class Discriminator(nn.Module):
                     padding=1,
                     bias=False,
                 ),
-                nn.BatchNorm2d(num_hiddens * nf_mult),
+                nn.GroupNorm(num_groups=32, num_channels=num_hiddens * nf_mult),
                 nn.LeakyReLU(0.2, True),
             ]
+            if n > 1:
+                sequence.append(NonLocalBlock2D(in_channels=num_hiddens * nf_mult))
 
         nf_mult_prev = nf_mult
         nf_mult = min(2**num_layers, 8)
@@ -57,7 +60,7 @@ class Discriminator(nn.Module):
                 padding=1,
                 bias=False,
             ),
-            nn.BatchNorm2d(num_hiddens * nf_mult),
+            nn.GroupNorm(num_groups=32, num_channels=num_hiddens * nf_mult),
             nn.LeakyReLU(0.2, True),
         ]
 

@@ -151,7 +151,7 @@ class VqVaeTrainer(Trainer):
     ):
         # nn.Modules used for training
         self.encoder = Encoder()
-        self.quantizer = FSQuantizer(levels=[8, 8, 8, 5, 5, 5], dim=1024)
+        self.quantizer = FSQuantizer(levels=[8, 8, 8, 5, 5], dim=1024)
         self.decoder = Decoder()
         self.discriminator = Discriminator(
             in_channels=3, num_layers=4, num_hiddens=128
@@ -184,8 +184,9 @@ class VqVaeTrainer(Trainer):
         x_recon = self.decoder(x)
         return x_recon
 
-    def decode_code(self, code):
-        raise NotImplementedError
+    def decode_from_indices(self, indices: torch.Tensor):
+        quantized_latents = self.quantizer.indices_to_codes(indices)
+        return self.decode(quantized_latents)
 
     @staticmethod
     def l1_reconstruction_loss(x: torch.Tensor, x_recon: torch.Tensor):

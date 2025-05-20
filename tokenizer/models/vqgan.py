@@ -17,9 +17,6 @@ class VQModel(pl.LightningModule):
         n_embed: int,
         embed_dim: int,
         base_learning_rate: float,
-        ckpt_path=None,  # TODO: Needed?
-        ignore_keys=[],
-        colorize_nlabels=None,
         remap=None,
         sane_index_shape=False,  # tell vector quantizer to return indices as bhw
     ):
@@ -40,22 +37,6 @@ class VQModel(pl.LightningModule):
         )
         self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
-        if ckpt_path is not None:
-            self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
-        if colorize_nlabels is not None:
-            assert type(colorize_nlabels) == int
-            self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
-
-    def init_from_ckpt(self, path, ignore_keys=list()):
-        sd = torch.load(path, map_location="cpu")["state_dict"]
-        keys = list(sd.keys())
-        for k in keys:
-            for ik in ignore_keys:
-                if k.startswith(ik):
-                    print("Deleting key {} from state_dict.".format(k))
-                    del sd[k]
-        self.load_state_dict(sd, strict=False)
-        print(f"Restored from {path}")
 
     def encode(self, x):
         h = self.encoder(x)
@@ -219,25 +200,3 @@ class VQModel(pl.LightningModule):
         both = torch.cat([top_row, bottom_row], dim=1)  # stack along height (dim=1)
 
         self.logger.experiment.add_image(name, both, step)
-
-    def log_images(self, batch, **kwargs):
-        log = dict()
-        x = self.get_input(batch, self.image_key)
-        x = x.to(self.device)
-        xrec, _ = self(x)
-        if x.shape[1] > 3:
-            # colorize with random projection
-            assert xrec.shape[1] > 3
-            x = self.to_rgb(x)
-            xrec = self.to_rgb(xrec)
-        log["inputs"] = x
-        log["reconstructions"] = xrec
-        return log
-
-    def to_rgb(self, x):
-        assert self.image_key == "segmentation"
-        if not hasattr(self, "colorize"):
-            self.register_buffer("colorize", torch.randn(3, x.shape[1], 1, 1).to(x))
-        x = F.conv2d(x, weight=self.colorize)
-        x = 2.0 * (x - x.min()) / (x.max() - x.min()) - 1.0
-        return x

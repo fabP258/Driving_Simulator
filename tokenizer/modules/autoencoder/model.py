@@ -1,53 +1,7 @@
+# pytorch_diffusion + derived encoder decoder
 import torch
 import torch.nn as nn
 import numpy as np
-from dataclasses import dataclass
-
-
-@dataclass
-class VqVaeConfig:
-    in_channels: int = 3
-    out_channels: int = 3
-    ch_mult: tuple[int] = (1, 2, 2, 4, 8)
-    attn_resolutions: tuple[int] = (16,)
-    resolution: int = 256
-    num_res_blocks: int = 2
-    z_channels: int = 1024
-    vocab_size: int = 8192
-    ch: int = 128
-    dropout: float = 0.0
-    double_z: bool = False
-    embedding_dim: int = 256
-    use_l2_normalization: bool = False
-    use_ema: bool = True
-    ema_decay: float = 0.99
-    ema_eps: float = 1e-5
-
-    def encoder_decoder_args(self) -> dict:
-        kw_args = {
-            "ch": self.ch,
-            "out_ch": self.out_channels,
-            "ch_mult": self.ch_mult,
-            "num_res_blocks": self.num_res_blocks,
-            "attn_resolutions": self.attn_resolutions,
-            "dropout": self.dropout,
-            "in_channels": self.in_channels,
-            "resolution": self.resolution,
-            "z_channels": self.z_channels,
-            "double_z": self.double_z,
-        }
-        return kw_args
-
-    def quantizer_args(self) -> dict:
-        kw_args = {
-            "embedding_dim": self.embedding_dim,
-            "num_embeddings": self.vocab_size,
-            "use_l2_normalization": self.use_l2_normalization,
-            "use_ema": self.use_ema,
-            "ema_decay": self.ema_decay,
-            "ema_eps": self.ema_eps,
-        }
-        return kw_args
 
 
 def nonlinearity(x):

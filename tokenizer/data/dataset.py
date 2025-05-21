@@ -21,10 +21,10 @@ def denormalize_image(x: torch.Tensor) -> torch.Tensor:
 class ImageDataset(Dataset):
     """A simple dataset for images stored as png files."""
 
-    def __init__(self, image_paths: List[Path]):
-        self.image_files = image_paths
+    def __init__(self, folder_path: str):
+        self.image_files = list(Path(folder_path).rglob("*.png"))
         self.transforms = transforms.Compose(
-            [transforms.Resize((288, 512)), transforms.ToTensor()]
+            [transforms.Resize((288, 512)), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
         )
 
     def __len__(self):

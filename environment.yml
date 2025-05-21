@@ -1,14 +1,17 @@
 name: driving_simulator
 channels:
   - pytorch
+  - defaults
   - nvidia
 dependencies:
-  - cudatoolkit
-  - matplotlib
   - python
+  - pip
   - pytorch
-  - pytorch-cuda
+  - pytorch-cuda=12.1
   - torchvision
-  - lpips
-  - tqdm
   - tensorboard
+  - pip:
+    - pytorch-lightning
+    - omegaconf
+    - einops
+    - -e .

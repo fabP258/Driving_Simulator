@@ -61,7 +61,12 @@ def train(
         logger=TensorBoardLogger(f"./logs/{dt}", name="vqgan"),
         callbacks=[checkpoint_callback],
     )
-    trainer.fit(model, train_dataloaders=train_dl, val_dataloaders=val_dl)
+    trainer.fit(
+        model,
+        train_dataloaders=train_dl,
+        val_dataloaders=val_dl,
+        ckpt_path=checkpoint_path,
+    )
 
 
 def _create_train_subparser(subparsers: _SubParsersAction) -> None:

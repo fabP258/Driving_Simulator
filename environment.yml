@@ -10,6 +10,7 @@ dependencies:
   - pytorch-cuda=12.1
   - torchvision
   - tensorboard
+  - opencv
   - pip:
     - pytorch-lightning
     - omegaconf

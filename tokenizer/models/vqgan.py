@@ -49,9 +49,12 @@ class VQModel(pl.LightningModule):
         dec = self.decoder(quant)
         return dec
 
-    def decode_code(self, code_b):
-        quant_b = self.quantize.embed_code(code_b)
-        dec = self.decode(quant_b)
+    def decode_tokens(self, indices):
+        embeddings = self.quantize.embedding(indices.view(indices.shape[0], -1))
+        B, _, C = embeddings.shape
+        H, W = indices.shape[1], indices.shape[2]
+        z_q = embeddings.permute(0, 2, 1).contiguous().view(B, C, H, W)
+        dec = self.decode(z_q)
         return dec
 
     def forward(self, input):

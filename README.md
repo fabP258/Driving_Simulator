@@ -23,7 +23,7 @@ Run the following commands in the terminal:
 ```console
 $ conda activate driving_simulator
 $ cd tokenizer
-$ python cli.py train --image_root_path <folder-path>
+$ python cli.py train --train_image_root_path <folder-path>
 ```
 
 To see all possible arguments for the training command run
@@ -48,15 +48,6 @@ tensorboard --logdir <logs-path> --port 6006
 
 Now you should be able to open the *TensorBoard* dashboard in the browser at `http://127.0.0.1:16006`.
 
-## Implemented features
-
-### Tokenizer
-
-* Finite Scalar Quantization (FSQ) [5]
-* GAN loss [2]
-* LPIPS perceptual loss [3]
-* Entropy calculation for codebook utilization monitoring during training
-
 ## References
 
 [1] van den Oord, A., Li, Y., & Vinyals, O. (2017). "Neural discrete representation learning".
@@ -66,5 +57,3 @@ Now you should be able to open the *TensorBoard* dashboard in the browser at `ht
 [3] Zhang, R., Isola, P., Efros, A. A., Shechtman, E., & Wang, O. (2018). "The Unreasonable Effectiveness of Deep Features as a Perceptual Metric".
 
 [4] Hu, A., Russell, L., Yeo, H., Murez, Z., Fedoseev, G., Kendall, A., Shotton, J., & Corrado, G. (2023). "GAIA-1: A Generative World Model for Autonomous Driving".
-
-[5] Mentzer, F., Minnen, D., Agustsson, E., Tschannen, M. (2023). "Finite Scalar Quantization: VQ-VAE Made Simple".

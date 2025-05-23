@@ -197,7 +197,19 @@ class Transformer(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layer))
 
         # report number of parameters
-        # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+        print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+
+    def get_num_params(self, non_embedding=True):
+        """
+        Return the number of parameters in the model.
+        For non-embedding count (default), the position embeddings get subtracted.
+        The token embeddings would too, except due to the parameter sharing these
+        params are actually used as weights in the final layer, so we include them.
+        """
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n_params -= self.transformer.wpe.weight.numel()
+        return n_params
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -208,7 +220,9 @@ class Transformer(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
-        self, idx: torch.Tensor, input_pos: Optional[torch.Tensor], targets=None
+        self,
+        idx: torch.Tensor,
+        targets: Optional[torch.Tensor] = None,
     ):
         device = idx.device
         b, t = idx.size()
@@ -216,8 +230,7 @@ class Transformer(nn.Module):
             t <= self.block_size
         ), f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
 
-        if input_pos is None:
-            input_pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+        input_pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
@@ -229,6 +242,8 @@ class Transformer(nn.Module):
             x = block(x)
         x = self.transformer.ln_f(x)
 
+        # TODO: should loss calculation be here?
+        # TODO: If targets are provided we return the full logits, if not only the last row -> inconsistent!
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
@@ -243,10 +258,3 @@ class Transformer(nn.Module):
             loss = None
 
         return logits, loss
-
-    def sample(self, logits: torch.Tensor):
-        probs = F.softmax(logits[0, -1], dim=-1)
-
-    def decode_one_token(self, x: torch.Tensor, input_pos: torch.Tensor):
-        assert input_pos.shape[-1] == 1
-        logits = self(x, input_pos)

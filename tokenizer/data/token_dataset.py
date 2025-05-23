@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, List
 from pathlib import Path
 import numpy as np
 
@@ -8,6 +8,20 @@ from torch.utils.data import Dataset
 
 def increment_slice(s: slice) -> slice:
     return slice(s.start + 1, s.stop + 1, s.step)
+
+
+def collate_fn_trim_to_min(batch: List[tuple]) -> tuple:
+    input_seqs, target_seqs = zip(*batch)
+    min_len = min(seq.size(0) for seq in input_seqs)
+
+    # Trim all sequences
+    input_seqs_trimmed = [seq[:min_len] for seq in input_seqs]
+    target_seqs_trimmed = [seq[:min_len] for seq in target_seqs]
+
+    input_batch = torch.stack(input_seqs_trimmed)
+    target_batch = torch.stack(target_seqs_trimmed)
+
+    return input_batch, target_batch
 
 
 class ImageTokenDataset(Dataset):

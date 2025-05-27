@@ -17,11 +17,13 @@ class VQModel(pl.LightningModule):
         n_embed: int,
         embed_dim: int,
         base_learning_rate: float,
+        grad_acc_steps: int,
         remap=None,
         sane_index_shape=False,  # tell vector quantizer to return indices as bhw
     ):
         super().__init__()
         self.save_hyperparameters()
+        self.grad_acc_steps = grad_acc_steps
         self.automatic_optimization = False
         self.learning_rate = base_learning_rate
         self.encoder = Encoder(**ddconfig)
@@ -68,9 +70,6 @@ class VQModel(pl.LightningModule):
 
         opt_ae, opt_disc = self.optimizers()
 
-        if batch_idx % 100 == 0:
-            self.log_batch_reconstructions(x, xrec, step=self.global_step)
-
         # ==== Autoencoder loss ====
         aeloss, log_dict_ae = self.loss(
             qloss,
@@ -81,7 +80,6 @@ class VQModel(pl.LightningModule):
             last_layer=self.get_last_layer(),
             split="train",
         )
-        # NOTE: on_epoch=True can't be used with pytorch-lightning<1.1.0 since it accumulates values on gpu
         self.log(
             "train/aeloss",
             float(aeloss.detach().cpu()),
@@ -93,9 +91,7 @@ class VQModel(pl.LightningModule):
         self.log_dict(
             log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=True
         )
-        opt_ae.zero_grad()
         self.manual_backward(aeloss)
-        opt_ae.step()
 
         # ==== Discriminator loss ==
         discloss, log_dict_disc = self.loss(
@@ -118,9 +114,14 @@ class VQModel(pl.LightningModule):
         self.log_dict(
             log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True
         )
-        opt_disc.zero_grad()
         self.manual_backward(discloss)
-        opt_disc.step()
+
+        if ((batch_idx + 1) % self.grad_acc_steps) == 0:
+            self.log_batch_reconstructions(x, xrec, step=self.global_step)
+            opt_ae.step()
+            opt_disc.step()
+            opt_ae.zero_grad()
+            opt_disc.zero_grad()
 
     def validation_step(self, batch, batch_idx):
         x = batch

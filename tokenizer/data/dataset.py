@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-from typing import List
+from typing import List, Sequence
 from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
@@ -21,10 +21,19 @@ def denormalize_image(x: torch.Tensor) -> torch.Tensor:
 class ImageDataset(Dataset):
     """A simple dataset for images stored as png files."""
 
-    def __init__(self, folder_path: str):
+    def __init__(self, folder_path: str, target_size: Sequence = (288, 512)):
         self.image_files = list(Path(folder_path).rglob("*.png"))
+        ratio = target_size[1] / target_size[0]
         self.transforms = transforms.Compose(
-            [transforms.Resize((288, 512)), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
+            [
+                transforms.RandomResizedCrop(
+                    size=target_size,  # (height, width)
+                    scale=(0.2, 1.0),
+                    ratio=(ratio, ratio),  # fixed aspect ratio for 16:9
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
         )
 
     def __len__(self):

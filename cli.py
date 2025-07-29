@@ -11,6 +11,9 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from tokenizer.models.vqgan import VQModel
 from tokenizer.data.dataset import ImageDataset
+from tokenizer.data.token_dataset import VideoTokenDataset
+from tokenizer.engine.trainer import Trainer as CustomTrainer
+from tokenizer.models.world_model import WorldModel
 
 
 def train(
@@ -20,11 +23,14 @@ def train(
     checkpoint_path: str | None,
     batch_size: int,
     num_workers: int,
+    grad_acc_steps: int,
 ):
     if config_path:
         config = OmegaConf.load(config_path)
         model = VQModel(
-            **config.model.params, base_learning_rate=config.model.base_learning_rate
+            **config.model.params,
+            base_learning_rate=config.model.base_learning_rate,
+            grad_acc_steps=grad_acc_steps,
         )
         if checkpoint_path:
             checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -52,10 +58,10 @@ def train(
         dirpath=Path("checkpoints") / dt,
         filename="vqgan_driving_{step}",
         save_top_k=-1,
-        every_n_train_steps=40000,
+        every_n_train_steps=2000,
     )
     trainer = Trainer(
-        max_epochs=10,
+        max_epochs=20,
         devices=1,
         accelerator="gpu",
         logger=TensorBoardLogger(f"./logs/{dt}", name="vqgan"),
@@ -67,6 +73,35 @@ def train(
         val_dataloaders=val_dl,
         ckpt_path=checkpoint_path,
     )
+
+
+def train_wm(
+    video_token_root_path: str, config_path: str, batch_size: int, num_workers: int
+):
+    config = OmegaConf.load(config_path)
+
+    module = WorldModel(**config.model)
+
+    train_ds = VideoTokenDataset(
+        video_token_root_path,
+        config.model.n_cond_frames,
+        config.model.H,
+        config.model.W,
+    )
+    train_dl = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=True,
+    )
+    dt = datetime.now().strftime("%Y%m%d_%H_%M_%S")
+    trainer = CustomTrainer(
+        max_epochs=10,
+        log_dir=f"./logs/{dt}",
+        checkpoint_dir=Path("checkpoints") / dt,
+        checkpoint_every_n_steps=10000,
+    )
+    trainer.fit(module, train_dl)
 
 
 def _create_train_subparser(subparsers: _SubParsersAction) -> None:
@@ -104,8 +139,42 @@ def _create_train_subparser(subparsers: _SubParsersAction) -> None:
         default=10,
         help="Size of mini-batches used for training and validation. Default: 10.",
     )
+    parser.add_argument(
+        "--grad_acc_steps",
+        type=int,
+        required=False,
+        default=1,
+        help="Number of gradient accumulation steps. Default: 1.",
+    )
     parser.add_argument("--num_workers", type=int, required=False, default=2)
     parser.set_defaults(command=train)
+
+
+def _create_train_wm_parser(subparsers: _SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "train_wm", description="Train a transformer World Model."
+    )
+    parser.add_argument(
+        "--video_token_root_path",
+        type=str,
+        required=True,
+        help="Path to the root folder containing tokenized video tensors.",
+    )
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        required=True,
+        help="Path to the model config yaml file.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        required=False,
+        default=10,
+        help="Size of mini-batches used for training and validation. Default: 10.",
+    )
+    parser.add_argument("--num_workers", type=int, required=False, default=2)
+    parser.set_defaults(command=train_wm)
 
 
 def _create_parser() -> ArgumentParser:
@@ -113,6 +182,7 @@ def _create_parser() -> ArgumentParser:
 
     subparsers = parser.add_subparsers()
     _create_train_subparser(subparsers)
+    _create_train_wm_parser(subparsers)
 
     return parser
 

@@ -4,6 +4,7 @@ from tqdm import tqdm
 
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from tokenizer.engine.module import TrainableModule
 
@@ -12,11 +13,13 @@ class Trainer:
     def __init__(
         self,
         max_epochs: int = 100,
+        log_dir: Optional[Union[Path, str]] = None,
         checkpoint_dir: Optional[Union[str, Path]] = None,
         checkpoint_every_n_steps: Optional[int] = None,
         device: Optional[str] = None,
     ):
         self.max_epochs = max_epochs
+        self.log_dir = log_dir
         self.checkpoint_dir: Union[None, Path] = (
             Path(checkpoint_dir) if checkpoint_dir is not None else None
         )
@@ -41,6 +44,9 @@ class Trainer:
     ):
         module = module.to(self.device)
 
+        if self.log_dir:
+            module.set_logger(SummaryWriter(self.log_dir))
+
         if isinstance(self.checkpoint_dir, Path):
             # TODO: what about checkpoint_dir = None?
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -49,8 +55,8 @@ class Trainer:
             module.epoch = epoch
             module.train()
             module.on_epoch_start()
-            for batch_idx, batch in tqdm(
-                enumerate(train_dataloader), desc=f"Train epoch {epoch}"
+            for batch_idx, batch in enumerate(
+                tqdm(train_dataloader, desc=f"Train epoch {epoch}")
             ):
                 batch = self._move_batch_to_device(batch)
                 module.training_step(batch, batch_idx)
@@ -65,8 +71,8 @@ class Trainer:
             module.on_epoch_end()
             if valid_dataloader:
                 module.eval()
-                for batch_idx, batch in tqdm(
-                    enumerate(valid_dataloader), desc=f"Validation epoch {epoch}"
+                for batch_idx, batch in enumerate(
+                    tqdm(valid_dataloader, desc=f"Validation epoch {epoch}")
                 ):
                     batch = self._move_batch_to_device(batch)
                     module.validation_step(batch, batch_idx)
@@ -81,6 +87,7 @@ class Trainer:
     ) -> Union[torch.Tensor, tuple, dict]:
         if isinstance(batch, torch.Tensor):
             return batch.to(self.device)
+        # TODO: call this function recursively for the following cases to account for nested data
         if isinstance(batch, (tuple, list)):
             return tuple(
                 t.to(self.device) if isinstance(t, torch.Tensor) else t for t in batch

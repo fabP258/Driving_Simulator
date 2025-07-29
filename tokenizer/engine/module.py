@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
 
 
 class TrainableModule(nn.Module, ABC):
@@ -26,7 +27,15 @@ class TrainableModule(nn.Module, ABC):
             self.hparams: dict = {}
         self.optimizers, self.lr_schedulers = self.configure_optimizers()
         self.epoch: int = 0  # Does this belong here?
-        self.step: Sequence[int] = [0 for _ in self.optimizers]
+        self.step: int = 0
+        self.logger: Union[SummaryWriter, None] = None
+
+    def set_logger(self, logger: SummaryWriter):
+        self.logger = logger
+
+    def log_scalar(self, tag: str, scalar: Union[float, int], step: int, **kwargs):
+        if self.logger:
+            self.logger.add_scalar(tag, scalar, step, **kwargs)
 
     @final
     def training_step(
@@ -39,8 +48,7 @@ class TrainableModule(nn.Module, ABC):
         batch_idx: int,
     ) -> Union[None, torch.Tensor]:
         self._training_step(batch, batch_idx)
-        for i in range(len(self.step)):
-            self.step[i] += 1
+        self.step += 1
 
     @abstractmethod
     def _training_step(

@@ -6,6 +6,7 @@ from typing import Dict, Union, Tuple, List
 
 from tokenizer.modules.autoencoder.model import Encoder, Decoder
 from tokenizer.modules.vqvae.quantize import VectorQuantizer2 as VectorQuantizer
+from tokenizer.modules.vqvae.quantize import FSQuantizer
 from tokenizer.modules.loss.vqperceptual import VQLPIPSWithDiscriminator
 
 
@@ -20,6 +21,7 @@ class VQModel(pl.LightningModule):
         grad_acc_steps: int,
         remap=None,
         sane_index_shape=False,  # tell vector quantizer to return indices as bhw
+        **extra_kwargs
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -30,15 +32,22 @@ class VQModel(pl.LightningModule):
         self.decoder = Decoder(**ddconfig)
         # only a single loss target is supported for now, breaks compatibility with some configs
         self.loss = VQLPIPSWithDiscriminator(**lossconfig.get("params", dict()))
-        self.quantize = VectorQuantizer(
-            n_embed,
-            embed_dim,
-            beta=0.25,
-            remap=remap,
-            sane_index_shape=sane_index_shape,
-        )
+        # self.quantize = VectorQuantizer(
+        #    n_embed,
+        #    embed_dim,
+        #    remap=remap,
+        #    sane_index_shape=sane_index_shape,
+        #    legacy=True,
+        # )
+        self.quantize = FSQuantizer(levels=[8, 8, 8, 6, 5], dtype=torch.float32)
         self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
+        # codebook utilization tracking
+        self.register_buffer(
+            "codebook_usage_counts",
+            torch.zeros(n_embed, dtype=torch.long),
+            persistent=False,
+        )
 
     def encode(self, x):
         h = self.encoder(x)
@@ -60,13 +69,31 @@ class VQModel(pl.LightningModule):
         return dec
 
     def forward(self, input):
-        quant, diff, _ = self.encode(input)
+        quant, diff, info = self.encode(input)
         dec = self.decode(quant)
-        return dec, diff
+        return dec, diff, info
 
     def training_step(self, batch, batch_idx):
         x = batch
-        xrec, qloss = self(x)
+        xrec, qloss, info = self(x)
+
+        # log the codebook usage counts
+        codebook_indices = info[2]
+        self.codebook_usage_counts += torch.bincount(
+            codebook_indices.view(-1), minlength=self.codebook_usage_counts.shape[0]
+        )
+        self.log(
+            "train/codebook_usage",
+            torch.count_nonzero(self.codebook_usage_counts)
+            / self.codebook_usage_counts.shape[0],
+            logger=True,
+            on_step=True,
+        )
+        probs = self.codebook_usage_counts.float() / torch.sum(
+            self.codebook_usage_counts.float()
+        )
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10))
+        self.log("train/codebook_entropy", entropy, logger=True, on_step=True)
 
         opt_ae, opt_disc = self.optimizers()
 
@@ -125,7 +152,7 @@ class VQModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x = batch
-        xrec, qloss = self(x)
+        xrec, qloss, _ = self(x)
         aeloss, log_dict_ae = self.loss(
             qloss,
             x,
@@ -171,6 +198,10 @@ class VQModel(pl.LightningModule):
             log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True
         )
         return self.log_dict  # TODO: Why?
+
+    def on_train_epoch_end(self):
+        # Reset buffer to zeros at the end of each training epoch
+        self.codebook_usage_counts.zero_()
 
     def configure_optimizers(self):
         lr = self.learning_rate

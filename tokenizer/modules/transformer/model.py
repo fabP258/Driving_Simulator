@@ -242,8 +242,6 @@ class Transformer(nn.Module):
             x = block(x)
         x = self.transformer.ln_f(x)
 
-        # TODO: should loss calculation be here?
-        # TODO: If targets are provided we return the full logits, if not only the last row -> inconsistent!
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)

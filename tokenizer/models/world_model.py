@@ -1,4 +1,4 @@
-import inspect
+import math
 import torch
 from typing import Optional
 from torchvision.utils import make_grid
@@ -31,6 +31,8 @@ class WorldModel(TrainableModule):
         self.lr = lr
         self.weight_decay = weight_decay
         block_size = n_cond_frames * H * W + (H * W - 1)
+        self.warm_up_steps = 200
+        self.total_steps = 2000000
         self.transformer = Transformer(
             vocab_size, block_size, n_embd, n_head, bias, n_layer, dropout
         )
@@ -40,12 +42,14 @@ class WorldModel(TrainableModule):
         logits, loss = self.transformer(*batch)
         # TODO: calculate loss here
         self.log_scalar("train/cross_entropy_loss", loss.item(), step=self.step)
+        self.log_scalar(
+            "train/learning_rate",
+            self.lr_schedulers[0].get_last_lr()[0],
+            step=self.step,
+        )
         if (batch_idx % 100) == 0:
             self.log_frame_sequences(logits.detach(), batch[0], max_context_frames=None)
-        opt = self.optimizers[0]
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+        return loss
 
     @torch.no_grad
     def log_frame_sequences(
@@ -67,6 +71,16 @@ class WorldModel(TrainableModule):
         # decode predicted frames
         probs = torch.nn.functional.softmax(logits, dim=-1)
         pred_tokens = torch.argmax(probs, dim=-1)
+        self.logger.add_histogram(
+            "train/output_token_distribution",
+            pred_tokens.view(-1).cpu(),
+            global_step=self.step,
+        )
+        self.logger.add_histogram(
+            "train/input_token_distribution",
+            input_tokens.view(-1).cpu(),
+            global_step=self.step,
+        )
         pred_tokens = pred_tokens[
             :,
             (num_cond_tokens - 1) :,
@@ -170,4 +184,14 @@ class WorldModel(TrainableModule):
             optim_groups, lr=self.lr, betas=(0.9, 0.95), fused=True
         )
 
-        return [optimizer], []
+        def lr_lambda(current_step):
+            if current_step < self.warm_up_steps:
+                return float(current_step) / float(max(1, self.warm_up_steps))
+            progress = float(current_step - self.warm_up_steps) / float(
+                max(1, self.total_steps - self.warm_up_steps)
+            )
+            return 0.5 * (1.0 + math.cos(math.pi * progress))  # cosine decay
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+        return [optimizer], [scheduler]

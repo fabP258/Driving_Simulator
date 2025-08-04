@@ -76,17 +76,27 @@ def train(
 
 
 def train_wm(
-    video_token_root_path: str, config_path: str, batch_size: int, num_workers: int
+    video_token_root_path: str,
+    config_path: str,
+    checkpoint_path: str,
+    batch_size: int,
+    num_workers: int,
+    grad_acc_steps: int,
 ):
-    config = OmegaConf.load(config_path)
-
-    module = WorldModel(**config.model)
+    ctor_args = {}
+    if config_path:
+        config = OmegaConf.load(config_path)
+        ctor_args.update(**config.model)
+    if checkpoint_path:
+        module = WorldModel.from_checkpoint(checkpoint_path, None, ctor_args)
+    else:
+        module = WorldModel(**ctor_args)
 
     train_ds = VideoTokenDataset(
         video_token_root_path,
-        config.model.n_cond_frames,
-        config.model.H,
-        config.model.W,
+        module.hparams["n_cond_frames"],
+        module.hparams["H"],
+        module.hparams["W"],
     )
     train_dl = DataLoader(
         train_ds,
@@ -96,12 +106,12 @@ def train_wm(
     )
     dt = datetime.now().strftime("%Y%m%d_%H_%M_%S")
     trainer = CustomTrainer(
-        max_epochs=10,
+        max_epochs=100,
         log_dir=f"./logs/{dt}",
         checkpoint_dir=Path("checkpoints") / dt,
         checkpoint_every_n_steps=10000,
     )
-    trainer.fit(module, train_dl)
+    trainer.fit(module, train_dl, grad_acc_steps=grad_acc_steps)
 
 
 def _create_train_subparser(subparsers: _SubParsersAction) -> None:
@@ -163,8 +173,16 @@ def _create_train_wm_parser(subparsers: _SubParsersAction) -> None:
     parser.add_argument(
         "--config_path",
         type=str,
-        required=True,
+        required=False,
+        default=None,
         help="Path to the model config yaml file.",
+    )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        required=False,
+        default=None,
+        help="Pre-trained model checkpoint.",
     )
     parser.add_argument(
         "--batch_size",
@@ -174,6 +192,7 @@ def _create_train_wm_parser(subparsers: _SubParsersAction) -> None:
         help="Size of mini-batches used for training and validation. Default: 10.",
     )
     parser.add_argument("--num_workers", type=int, required=False, default=2)
+    parser.add_argument("--grad_acc_steps", type=int, required=False, default=1)
     parser.set_defaults(command=train_wm)
 
 

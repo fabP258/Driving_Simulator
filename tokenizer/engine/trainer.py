@@ -41,6 +41,7 @@ class Trainer:
         train_dataloader: DataLoader,
         valid_dataloader: Optional[DataLoader] = None,
         checkpoint_prefix: str = "",
+        grad_acc_steps: int = 1,
     ):
         module = module.to(self.device)
 
@@ -59,7 +60,17 @@ class Trainer:
                 tqdm(train_dataloader, desc=f"Train epoch {epoch}")
             ):
                 batch = self._move_batch_to_device(batch)
-                module.training_step(batch, batch_idx)
+                loss = module.training_step(batch, batch_idx)
+                loss = loss / grad_acc_steps
+                loss.backward()
+                if (batch_idx + 1) % grad_acc_steps == 0 or (batch_idx + 1) == len(
+                    train_dataloader
+                ):
+                    optimizer = module.optimizers[0]
+                    scheduler = module.lr_schedulers[0]
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
                 if (
                     self.checkpoint_every_n_steps
                     and (module.step % self.checkpoint_every_n_steps) == 0

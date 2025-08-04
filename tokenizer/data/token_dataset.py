@@ -9,7 +9,12 @@ from torch.utils.data import Dataset
 class VideoTokenDataset(Dataset):
 
     def __init__(
-        self, token_root_path: Union[str, Path], num_cond_frames: int, H: int, W: int
+        self,
+        token_root_path: Union[str, Path],
+        num_cond_frames: int,
+        H: int,
+        W: int,
+        max_token_files: int = None,
     ):
         super().__init__()
 
@@ -30,6 +35,9 @@ class VideoTokenDataset(Dataset):
 
             self.token_files.append(tf)
             num_token_sequences.append(F - num_cond_frames)
+
+            if max_token_files is not None and len(self.token_files) >= max_token_files:
+                break
 
         self.cumulative_lengths = np.cumsum(
             num_token_sequences

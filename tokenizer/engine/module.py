@@ -29,6 +29,7 @@ class TrainableModule(nn.Module, ABC):
         self.epoch: int = 0  # Does this belong here?
         self.step: int = 0
         self.logger: Union[SummaryWriter, None] = None
+        self.print_parameter_overview()
 
     def set_logger(self, logger: SummaryWriter):
         self.logger = logger
@@ -46,9 +47,10 @@ class TrainableModule(nn.Module, ABC):
             Dict[str, torch.Tensor],
         ],
         batch_idx: int,
-    ) -> Union[None, torch.Tensor]:
-        self._training_step(batch, batch_idx)
+    ) -> torch.Tensor:
+        loss = self._training_step(batch, batch_idx)
         self.step += 1
+        return loss
 
     @abstractmethod
     def _training_step(
@@ -59,7 +61,7 @@ class TrainableModule(nn.Module, ABC):
             Dict[str, torch.Tensor],
         ],
         batch_idx: int,
-    ) -> Union[None, torch.Tensor]:
+    ) -> torch.Tensor:
         pass
 
     @final
@@ -109,11 +111,13 @@ class TrainableModule(nn.Module, ABC):
         cls,
         file_path: Union[str, Path],
         map_location: Optional[str] = None,
-        **extra_kwargs,
+        overwrite_kwargs: dict = None,
     ) -> "TrainableModule":
         checkpoint = torch.load(file_path, map_location=map_location)
         hparams = checkpoint["hparams"]
-        module = cls(**hparams, **extra_kwargs)
+        if overwrite_kwargs:
+            hparams.update(overwrite_kwargs)
+        module = cls(**hparams)
         module.load_state_dict(checkpoint["model_state"])
 
         if (opt_len := len(module.optimizers)) != (
@@ -176,7 +180,7 @@ class TrainableModule(nn.Module, ABC):
     def print_parameter_overview(self):
         print(f"{'Module Name':<30} {'Module Type':<25} {'Trainable Params':>15}")
         print("-" * 75)
-        for name, module in self.named_modules():
+        for name, module in self.named_children():
             if name == "":
                 # Skip the root module itself
                 continue

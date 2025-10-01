@@ -28,7 +28,7 @@ $ conda activate driving_simulator
 Run the following command in the terminal:
 
 ```console
-$ python cli.py train --train_image_root_path <train-folder-path> --config_path ./configs/vqgan_driving_f16_16384_medium.yaml
+$ python cli.py train --train_image_root_path ./data/img --config_path ./configs/vqgan_driving_f16_16384_medium.yaml
 ```
 
 To see all possible arguments for the training command run

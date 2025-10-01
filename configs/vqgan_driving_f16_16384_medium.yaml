@@ -1,0 +1,28 @@
+model:
+  lr: 1e-4
+  ch: 256
+  ch_mult:
+    - 1
+    - 1
+    - 2
+    - 2
+    - 4
+  num_res_blocks: 2
+  attn_resolutions:
+    - 16
+  resolution: 256
+  z_channels: 256
+  double_z: false
+  fsq_levels: 
+    - 8
+    - 8
+    - 8
+    - 6
+    - 5
+  latent_channels: 5
+  disc_start: 20000
+  disc_factor: 1.0
+  disc_weight: 0.1
+  perceptual_weight: 1.0
+  pixelloss_weight: 1.0
+  dropout: 0.0

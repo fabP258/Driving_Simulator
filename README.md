@@ -1,29 +1,34 @@
 # Driving_Simulator
-A PyTorch based training framework for a Machine Learning Driving Simulator like the GAIA-1 [4]. Currently only the image tokenizer is implemented. A transformer-based, action-conditioned world model will follow soon.
+This project explores world models for autonomous driving, inspired by Wayve’s GAIA-1. A world model learns to represent and predict driving environments from video, enabling agents to “imagine” future states without explicit physics simulation. This repository implements a modular PyTorch framework for training and evaluating such models.
 
-<img src="img/VQ_GAN.png" alt="Architecture">
+# Features
+* **Image Tokenizer**
+    * Compresses and discretizes images
+    * Uses *finite scalar quantization*
+    * Trained on $L_1$, Perceptual and GAN loss
+    * Example (Top: original image, Bottom: reconstruction using 16 x 16 spatial compression)
+    <img src="img/image_reconstruction.png" alt="reconstruction example" width="400">
 
-The gifs below show on the top the (256,512) original video and on the bottom a reconstruction from 16 x 32 (spatial compression rate 16) visual tokens from a learned codebook consisting of 1024 vectors of size 256 each.
+* **Latent Dynamics Transformer**
+    * Uses a vanilla transformer model and cross-entropy loss
+    * Acts in the latent space of the discrete image tokenizer
+    * Predicts image tokens conditioned on previous frames
 
-![Original video](img/original.gif)
-![Reconstructed video](img/reconstructed.gif)
-
-## Getting started
+## Usage
 
 ### Setup conda environment
 
 ```console
 $ conda env create -f environment.yml
+$ conda activate driving_simulator
 ```
 
-### Train the model
+### Train an image tokenizer (FSQ-VAE)
 
-Run the following commands in the terminal:
+Run the following command in the terminal:
 
 ```console
-$ conda activate driving_simulator
-$ cd tokenizer
-$ python cli.py train --train_image_root_path <folder-path>
+$ python cli.py train --train_image_root_path <train-folder-path> --config_path ./configs/vqgan_driving_f16_16384_medium.yaml
 ```
 
 To see all possible arguments for the training command run

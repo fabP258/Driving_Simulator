@@ -26,8 +26,13 @@ class TrainableModule(nn.Module, ABC):
         if not hasattr(self, "hparams"):
             self.hparams: dict = {}
         self.optimizers, self.lr_schedulers = self.configure_optimizers()
+        if len(self.optimizers) != len(self.lr_schedulers):
+            raise ValueError(
+                f"Method configure_optimizers must return sequences of equal length but got {len(self.optimizers)} and {len(self.lr_schedulers)}"
+            )
         self.epoch: int = 0  # Does this belong here?
-        self.step: int = 0
+        self.micro_step: list[int] = [0] * len(self.optimizers)
+        self.macro_step: list[int] = [0] * len(self.optimizers)
         self.logger: Union[SummaryWriter, None] = None
         self.print_parameter_overview()
 
@@ -38,6 +43,13 @@ class TrainableModule(nn.Module, ABC):
         if self.logger:
             self.logger.add_scalar(tag, scalar, step, **kwargs)
 
+    def log_dict(self, logs: Dict[str, torch.Tensor], step: int, **kwargs):
+        for k, v in logs.items():
+            self.log_scalar(k, v.item(), step, **kwargs)
+
+    def num_optimizers(self):
+        return len(self.optimizers)
+
     @final
     def training_step(
         self,
@@ -47,9 +59,10 @@ class TrainableModule(nn.Module, ABC):
             Dict[str, torch.Tensor],
         ],
         batch_idx: int,
+        opt_idx: int,
     ) -> torch.Tensor:
-        loss = self._training_step(batch, batch_idx)
-        self.step += 1
+        loss = self._training_step(batch, batch_idx, opt_idx)
+        self.micro_step[opt_idx] += 1
         return loss
 
     @abstractmethod
@@ -61,6 +74,7 @@ class TrainableModule(nn.Module, ABC):
             Dict[str, torch.Tensor],
         ],
         batch_idx: int,
+        opt_idx: int,
     ) -> torch.Tensor:
         pass
 
@@ -87,11 +101,21 @@ class TrainableModule(nn.Module, ABC):
     ) -> None:
         pass
 
+    def optimizer_step(self, opt_idx: int):
+        opt = self.optimizers[opt_idx]
+        sched = self.lr_schedulers[opt_idx]
+        opt.step()
+        opt.zero_grad()
+        if sched is not None:
+            sched.step()
+        self.macro_step[opt_idx] += 1
+
     @abstractmethod
     def configure_optimizers(
         self,
     ) -> Tuple[
-        Sequence[torch.optim.Optimizer], Sequence[torch.optim.lr_scheduler.LRScheduler]
+        Sequence[torch.optim.Optimizer],
+        Sequence[Optional[torch.optim.lr_scheduler.LRScheduler]],
     ]:
         pass
 
@@ -100,9 +124,12 @@ class TrainableModule(nn.Module, ABC):
             "model_state": self.state_dict(),
             "hparams": self.hparams,
             "optimizer_states": [opt.state_dict() for opt in self.optimizers],
-            "scheduler_states": [sch.state_dict() for sch in self.lr_schedulers],
+            "scheduler_states": [
+                sch.state_dict() if sch else None for sch in self.lr_schedulers
+            ],
             "epoch": self.epoch,
-            "step": self.step,
+            "micro_step": self.micro_step,
+            "macro_step": self.macro_step,
         }
         torch.save(checkpoint, file_path)
 
@@ -140,10 +167,13 @@ class TrainableModule(nn.Module, ABC):
         for sched, sched_state in zip(
             module.lr_schedulers, checkpoint["scheduler_states"]
         ):
+            if sched is None or sched_state is None:
+                continue
             sched.load_state_dict(sched_state)
 
         module.epoch = checkpoint.get("epoch", 0)
-        module.step = checkpoint.get("step", 0)
+        module.micro_step = checkpoint.get("micro_step", [0] * opt_len)
+        module.macro_step = checkpoint.get("macro_step", [0] * opt_len)
 
         return module
 

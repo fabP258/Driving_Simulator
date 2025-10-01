@@ -1,3 +1,4 @@
+# Adapted from https://github.com/CompVis/taming-transformers/blob/master/taming/modules/losses/vqperceptual.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,7 +32,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
     def __init__(
         self,
         disc_start: int,
-        codebook_weight=1.0,
         pixelloss_weight=1.0,
         disc_num_layers=3,
         disc_in_channels=3,
@@ -45,7 +45,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
     ):
         super().__init__()
         assert disc_loss in ["hinge", "vanilla"]
-        self.codebook_weight = codebook_weight
         self.pixel_weight = pixelloss_weight
         self.perceptual_loss = LPIPS().eval()
         self.perceptual_weight = perceptual_weight
@@ -87,7 +86,6 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
     def forward(
         self,
-        codebook_loss,
         inputs,
         reconstructions,
         optimizer_idx,
@@ -97,16 +95,15 @@ class VQLPIPSWithDiscriminator(nn.Module):
         split="train",
     ):
         rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())
+        nll_loss = rec_loss * self.pixel_weight
         if self.perceptual_weight > 0:
             p_loss = self.perceptual_loss(
                 inputs.contiguous(), reconstructions.contiguous()
             )
-            rec_loss = rec_loss + self.perceptual_weight * p_loss
+            nll_loss += p_loss * self.perceptual_weight
         else:
             p_loss = torch.tensor([0.0])
 
-        nll_loss = rec_loss
-        # nll_loss = torch.sum(nll_loss) / nll_loss.shape[0]
         nll_loss = torch.mean(nll_loss)
 
         # now the GAN part
@@ -133,15 +130,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
             disc_factor = adopt_weight(
                 self.disc_factor, global_step, threshold=self.discriminator_iter_start
             )
-            loss = (
-                nll_loss
-                + d_weight * disc_factor * g_loss
-                + self.codebook_weight * codebook_loss.mean()
-            )
+            loss = nll_loss + d_weight * disc_factor * g_loss
 
             log = {
                 "{}/total_loss".format(split): loss.clone().detach().mean(),
-                "{}/quant_loss".format(split): codebook_loss.detach().mean(),
                 "{}/nll_loss".format(split): nll_loss.detach().mean(),
                 "{}/rec_loss".format(split): rec_loss.detach().mean(),
                 "{}/p_loss".format(split): p_loss.detach().mean(),

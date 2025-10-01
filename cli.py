@@ -3,16 +3,12 @@ from pathlib import Path
 from datetime import datetime
 from omegaconf import OmegaConf
 
-import torch
 from torch.utils.data import DataLoader
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
 
-from tokenizer.models.vqgan import VQModel
+from tokenizer.models.vqgan import ImageTokenizer
 from tokenizer.data.dataset import ImageDataset
 from tokenizer.data.token_dataset import VideoTokenDataset
-from tokenizer.engine.trainer import Trainer as CustomTrainer
+from tokenizer.engine.trainer import Trainer
 from tokenizer.models.world_model import WorldModel
 
 
@@ -25,22 +21,14 @@ def train(
     num_workers: int,
     grad_acc_steps: int,
 ):
+    ctor_args = {}
     if config_path:
         config = OmegaConf.load(config_path)
-        model = VQModel(
-            **config.model.params,
-            base_learning_rate=config.model.base_learning_rate,
-            grad_acc_steps=grad_acc_steps,
-        )
-        if checkpoint_path:
-            checkpoint = torch.load(checkpoint_path, map_location="cpu")
-            model.load_state_dict(checkpoint["state_dict"])
+        ctor_args.update(**config.model)
+    if checkpoint_path:
+        module = ImageTokenizer.from_checkpoint(checkpoint_path, None, ctor_args)
     else:
-        if not checkpoint_path:
-            assert ValueError(
-                "Unable to instantiate VQModel with both missing config and checkpoint."
-            )
-        model = VQModel.load_from_checkpoint(checkpoint_path)
+        module = ImageTokenizer(**ctor_args)
 
     train_ds = ImageDataset(folder_path=train_image_root_path)
     train_dl = DataLoader(
@@ -54,25 +42,13 @@ def train(
         )
 
     dt = datetime.now().strftime("%Y%m%d_%H_%M_%S")
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=Path("checkpoints") / dt,
-        filename="vqgan_driving_{step}",
-        save_top_k=-1,
-        every_n_train_steps=2000,
-    )
     trainer = Trainer(
-        max_epochs=20,
-        devices=1,
-        accelerator="gpu",
-        logger=TensorBoardLogger(f"./logs/{dt}", name="vqgan"),
-        callbacks=[checkpoint_callback],
+        max_epochs=100,
+        log_dir=f"./logs/{dt}",
+        checkpoint_dir=Path("checkpoints") / dt,
+        checkpoint_every_n_steps=10000,
     )
-    trainer.fit(
-        model,
-        train_dataloaders=train_dl,
-        val_dataloaders=val_dl,
-        ckpt_path=checkpoint_path,
-    )
+    trainer.fit(module, train_dl, val_dl, grad_acc_steps=grad_acc_steps)
 
 
 def train_wm(
@@ -105,7 +81,7 @@ def train_wm(
         shuffle=True,
     )
     dt = datetime.now().strftime("%Y%m%d_%H_%M_%S")
-    trainer = CustomTrainer(
+    trainer = Trainer(
         max_epochs=100,
         log_dir=f"./logs/{dt}",
         checkpoint_dir=Path("checkpoints") / dt,
@@ -162,7 +138,7 @@ def _create_train_subparser(subparsers: _SubParsersAction) -> None:
 
 def _create_train_wm_parser(subparsers: _SubParsersAction) -> None:
     parser = subparsers.add_parser(
-        "train_wm", description="Train a transformer World Model."
+        "train_wm", description="Train a latent dynamics transformer."
     )
     parser.add_argument(
         "--video_token_root_path",
@@ -197,7 +173,7 @@ def _create_train_wm_parser(subparsers: _SubParsersAction) -> None:
 
 
 def _create_parser() -> ArgumentParser:
-    parser = ArgumentParser(description="VQ-VAE Command Line Interface")
+    parser = ArgumentParser(description="Driving Simulator CLI")
 
     subparsers = parser.add_subparsers()
     _create_train_subparser(subparsers)

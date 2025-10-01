@@ -28,7 +28,6 @@ class ImageTokenizer(TrainableModule):
         disc_weight: float,
         pixelloss_weight: float,
         perceptual_weight: float,
-        gram_matrix_weight: float,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -71,7 +70,6 @@ class ImageTokenizer(TrainableModule):
             disc_weight=disc_weight,
             pixelloss_weight=pixelloss_weight,
             perceptual_weight=perceptual_weight,
-            gram_matrix_weight=gram_matrix_weight,
         )
 
     # TODO: encode() & decode() can simply be the forward calls

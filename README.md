@@ -53,6 +53,20 @@ tensorboard --logdir <logs-path> --port 6006
 
 Now you should be able to open the *TensorBoard* dashboard in the browser at `http://127.0.0.1:16006`.
 
+# Project structure
+
+```
+├── configs/        # YAML configs for model training
+├── data/           # Example images
+├── tokenizer/
+|  ├── data/        # datasets
+|  ├── engine/      # training engine (minimal Pytorch Lightning)
+|  ├── models/      # trainable models
+|  └── modules/     # model components (not standalone trainable)
+├── cli.py          # Training entrypoint
+└── environment.yml # Conda environment
+```
+
 ## References
 
 [1] van den Oord, A., Li, Y., & Vinyals, O. (2017). "Neural discrete representation learning".

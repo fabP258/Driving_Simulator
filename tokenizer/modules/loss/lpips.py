@@ -1,5 +1,4 @@
-"""Stripped version of https://github.com/richzhang/PerceptualSimilarity/tree/master/models"""
-
+# Adapted from https://github.com/CompVis/taming-transformers/blob/master/taming/modules/losses/lpips.py
 import torch
 import torch.nn as nn
 from torchvision import models

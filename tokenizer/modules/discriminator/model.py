@@ -1,3 +1,4 @@
+# Source: https://github.com/CompVis/taming-transformers/blob/master/taming/modules/discriminator/model.py
 import functools
 import torch.nn as nn
 

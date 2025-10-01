@@ -1,4 +1,4 @@
-# pytorch_diffusion + derived encoder decoder
+# Model adapted from https://github.com/CompVis/taming-transformers/blob/master/taming/modules/diffusionmodules/model.py
 import torch
 import torch.nn as nn
 import numpy as np
@@ -162,7 +162,6 @@ class Encoder(nn.Module):
         self,
         *,
         ch,
-        out_ch,
         ch_mult=(1, 2, 4, 8),
         num_res_blocks,
         attn_resolutions,
@@ -282,7 +281,6 @@ class Decoder(nn.Module):
         attn_resolutions,
         dropout=0.0,
         resamp_with_conv=True,
-        in_channels,
         resolution,
         z_channels,
         give_pre_end=False,
@@ -294,7 +292,6 @@ class Decoder(nn.Module):
         self.num_resolutions = len(ch_mult)
         self.num_res_blocks = num_res_blocks
         self.resolution = resolution
-        self.in_channels = in_channels
         self.give_pre_end = give_pre_end
 
         # compute in_ch_mult, block_in and curr_res at lowest res

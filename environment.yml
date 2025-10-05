@@ -1,17 +1,10 @@
 name: driving_simulator
 channels:
-  - pytorch
+  - conda-forge
   - defaults
-  - nvidia
+
 dependencies:
-  - python
+  - python=3.10
   - pip
-  - pytorch
-  - pytorch-cuda=12.1
-  - torchvision
-  - tensorboard
-  - opencv
   - pip:
-    - omegaconf
-    - einops
-    - -e .
+      - -r requirements.txt

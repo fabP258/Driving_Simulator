@@ -6,7 +6,7 @@ from torchvision.utils import make_grid
 from tokenizer.engine.module import TrainableModule
 from tokenizer.modules.transformer.model import Transformer
 
-from cosmos_tokenizer.image_lib import ImageTokenizer
+#from cosmos_tokenizer.image_lib import ImageTokenizer
 
 
 class WorldModel(TrainableModule):
@@ -36,7 +36,8 @@ class WorldModel(TrainableModule):
         self.transformer = Transformer(
             vocab_size, block_size, n_embd, n_head, bias, n_layer, dropout
         )
-        self.tokenizer = ImageTokenizer(checkpoint_dec=decoder_ckpt, device="cpu")
+        #self.tokenizer = ImageTokenizer(checkpoint_dec=decoder_ckpt, device="cpu")
+        self.tokenizer = None
 
     def _training_step(self, batch, batch_idx):
         logits, loss = self.transformer(*batch)

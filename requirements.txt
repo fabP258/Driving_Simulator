@@ -1,0 +1,7 @@
+torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128 
+torchvision
+omegaconf 
+einops
+tensorboard
+requests
+-e .

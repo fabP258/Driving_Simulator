@@ -101,7 +101,7 @@ def _create_train_subparser(subparsers: _SubParsersAction) -> None:
     parser.add_argument(
         "--val_image_root_path",
         type=str,
-        required=True,
+        required=False,
         help="Path to the root folder containing images (png) for validation.",
     )
     parser.add_argument(

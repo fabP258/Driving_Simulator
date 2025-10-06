@@ -1,6 +1,7 @@
 # Model adapted from https://github.com/CompVis/taming-transformers/blob/master/taming/modules/diffusionmodules/model.py
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
 
@@ -16,39 +17,28 @@ def Normalize(in_channels):
 
 
 class Upsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
+    def __init__(self, in_channels: int):
         super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            self.conv = torch.nn.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=1, padding=1
-            )
+        self.conv = torch.nn.Conv2d(
+            in_channels, in_channels, kernel_size=3, stride=1, padding=1
+        )
 
-    def forward(self, x):
-        x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
-        if self.with_conv:
-            x = self.conv(x)
-        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.repeat_interleave(2, dim=2).repeat_interleave(2, dim=3)
+        return self.conv(x)
 
 
 class Downsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
+    def __init__(self, in_channels: int):
         super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            # no asymmetric padding in torch conv, must do it ourselves
-            self.conv = torch.nn.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=2, padding=0
-            )
+        self.conv = torch.nn.Conv2d(
+            in_channels, in_channels, kernel_size=3, stride=2, padding=0
+        )
 
-    def forward(self, x):
-        if self.with_conv:
-            pad = (0, 1, 0, 1)
-            x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
-            x = self.conv(x)
-        else:
-            x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
-        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pad = (0, 1, 0, 1)
+        x = F.pad(x, pad, mode="constant", value=0)
+        return self.conv(x)
 
 
 class ResnetBlock(nn.Module):
@@ -166,7 +156,6 @@ class Encoder(nn.Module):
         num_res_blocks,
         attn_resolutions,
         dropout=0.0,
-        resamp_with_conv=True,
         in_channels,
         resolution,
         z_channels,
@@ -210,7 +199,7 @@ class Encoder(nn.Module):
             down.block = block
             down.attn = attn
             if i_level != self.num_resolutions - 1:
-                down.downsample = Downsample(block_in, resamp_with_conv)
+                down.downsample = Downsample(block_in)
                 curr_res = curr_res // 2
             self.down.append(down)
 
@@ -280,7 +269,6 @@ class Decoder(nn.Module):
         num_res_blocks,
         attn_resolutions,
         dropout=0.0,
-        resamp_with_conv=True,
         resolution,
         z_channels,
         give_pre_end=False,
@@ -348,7 +336,7 @@ class Decoder(nn.Module):
             up.block = block
             up.attn = attn
             if i_level != 0:
-                up.upsample = Upsample(block_in, resamp_with_conv)
+                up.upsample = Upsample(block_in)
                 curr_res = curr_res * 2
             self.up.insert(0, up)  # prepend to get consistent order
 

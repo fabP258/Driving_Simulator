@@ -43,7 +43,7 @@ class Trainer:
         checkpoint_prefix: str = "",
         grad_acc_steps: int = 1,
     ):
-        module = module.to(self.device)
+        module.to_device(self.device)
 
         if self.log_dir:
             module.set_logger(SummaryWriter(self.log_dir))

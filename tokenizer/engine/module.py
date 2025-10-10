@@ -218,6 +218,14 @@ class TrainableModule(nn.Module, ABC):
             print(f"{name:<30} {type(module).__name__:<25} {param_count:>15,}")
         print("-" * 75)
 
+    def to_device(self, device):
+        self.to(device)
+        for opt in self.optimizers:
+            for state in opt.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
+
     # --- callbacks ---
 
     def on_epoch_start(self) -> None:
